@@ -33,6 +33,7 @@ class StandardModel(EasySyntax):
         scheduler_class: Optional[type] = None,
         scheduler_kwargs: Optional[Dict] = None,
         scheduler_config: Optional[Dict] = None,
+        log_kwargs: Optional[Dict] = None,
     ) -> None:
         """Construct `StandardModel`."""
         # Base class constructor
@@ -43,6 +44,7 @@ class StandardModel(EasySyntax):
             scheduler_class=scheduler_class,
             scheduler_kwargs=scheduler_kwargs,
             scheduler_config=scheduler_config,
+            log_kwargs=log_kwargs,
         )
 
         # deprecation warnings

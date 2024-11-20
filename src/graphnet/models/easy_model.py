@@ -36,6 +36,7 @@ class EasySyntax(Model):
         scheduler_class: Optional[type] = None,
         scheduler_kwargs: Optional[Dict] = None,
         scheduler_config: Optional[Dict] = None,
+        log_kwargs: Optional[Dict] = None,
     ) -> None:
         """Construct `StandardModel`."""
         # Base class constructor
@@ -52,6 +53,8 @@ class EasySyntax(Model):
         self._scheduler_class = scheduler_class
         self._scheduler_kwargs = scheduler_kwargs or dict()
         self._scheduler_config = scheduler_config or dict()
+        self._log_kwargs = log_kwargs
+        self.default_log_kwargs()
 
         self.validate_tasks()
 
@@ -245,10 +248,7 @@ class EasySyntax(Model):
             "train_loss",
             loss,
             batch_size=self._get_batch_size(train_batch),
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False,
-            sync_dist=True,
+            **self._log_kwargs,
         )
 
         current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
@@ -266,10 +266,7 @@ class EasySyntax(Model):
             "val_loss",
             loss,
             batch_size=self._get_batch_size(val_batch),
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False,
-            sync_dist=True,
+            **self._log_kwargs,
         )
         return loss
 
@@ -491,3 +488,20 @@ class EasySyntax(Model):
                 "patience=5 and monitor = 'val_loss'."
             )
         return callbacks
+    
+    def default_log_kwargs(self):
+        """Sets the default log kwargs if none passed 
+        and does type checking"""
+        default = {
+            'prog_bar'  :True,
+            'on_epoch'  :True,
+            'on_step'   :False,
+            'sync_dist' :True,
+        }
+        if self._log_kwargs is None:
+            self._log_kwargs = default
+        else:
+            for key in default:
+                self._log_kwargs.setdefault(key,default[key])
+                assert isinstance(self._log_kwargs[key],bool), \
+                "The setting '{key}' in 'log_kwargs' has to be a BOOL."
