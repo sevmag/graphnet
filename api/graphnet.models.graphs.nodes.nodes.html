@@ -129,7 +129,7 @@
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
     <link rel="next" title="graph_definition" href="graphnet.models.graphs.graph_definition.html" />
-    <link rel="prev" title="features" href="graphnet.models.graphs.nodes.features.html" />
+    <link rel="prev" title="nodes" href="graphnet.models.graphs.nodes.html" />
   
    
 
@@ -404,13 +404,6 @@
     <li class="md-nav__item">
     
     
-      <a href="graphnet.models.graphs.nodes.features.html" class="md-nav__link">features</a>
-      
-    
-    </li>
-    <li class="md-nav__item">
-    
-    
     <input class="md-toggle md-nav__toggle" data-md-toggle="toc" type="checkbox" id="__toc">
     <label class="md-nav__link md-nav__link--active" for="__toc"> nodes </label>
     
@@ -441,12 +434,6 @@
         <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.NodeAsDOMTimeSeries" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">NodeAsDOMTimeSeries</span></code></a>
         </li>
         <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.IceMixNodes" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">IceMixNodes</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.Cluster" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">Cluster</span></code></a><nav class="md-nav">
-              <ul class="md-nav__list">
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.Cluster.cluster_summarize" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cluster_summarize()</span></code></a>
-        </li></ul>
-            </nav>
         </li></ul>
             </nav>
         </li>
@@ -514,20 +501,6 @@
     
       <a href="#graphnet.models.graphs.nodes.nodes.IceMixNodes" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">IceMixNodes</span></code></a>
       
-    
-    </li>
-    <li class="md-nav__item">
-    
-    
-      <a href="#graphnet.models.graphs.nodes.nodes.Cluster" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">Cluster</span></code></a>
-      <ul class="md-nav__list"> 
-    <li class="md-nav__item">
-    
-    
-      <a href="#graphnet.models.graphs.nodes.nodes.Cluster.cluster_summarize" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cluster_summarize()</span></code></a>
-      
-    
-    </li></ul>
     
     </li></ul>
     
@@ -687,12 +660,6 @@
         <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.NodeAsDOMTimeSeries" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">NodeAsDOMTimeSeries</span></code></a>
         </li>
         <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.IceMixNodes" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">IceMixNodes</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.Cluster" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">Cluster</span></code></a><nav class="md-nav">
-              <ul class="md-nav__list">
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.nodes.nodes.Cluster.cluster_summarize" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cluster_summarize()</span></code></a>
-        </li></ul>
-            </nav>
         </li></ul>
             </nav>
         </li>
@@ -839,7 +806,8 @@ percentiles.</p>
 <li><p><strong>id_columns</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code>[<code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>]</span>, default: <code class="docutils literal notranslate"><span class="pre">['dom_x',</span> <span class="pre">'dom_y',</span> <span class="pre">'dom_z']</span></code>) – List of columns that uniquely identify a DOM.</p></li>
 <li><p><strong>time_column</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></span>, default: <code class="docutils literal notranslate"><span class="pre">'dom_time'</span></code>) – Name of time column.</p></li>
 <li><p><strong>charge_column</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></span>, default: <code class="docutils literal notranslate"><span class="pre">'charge'</span></code>) – Name of charge column.</p></li>
-<li><p><strong>max_activations</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code>[<code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Maximum number of activations to include in the time series.</p></li>
+<li><p><strong>max_activations</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-data docutils literal notranslate"><span class="pre">Optional</span></code>[<code class="xref py py-class docutils literal notranslate"><span class="pre">int</span></code>]</span>, default: <code class="docutils literal notranslate"><span class="pre">None</span></code>) – Maximum number of activations to include in
+the time series.</p></li>
 <li><p><strong>args</strong> (<em>Any</em>)</p></li>
 <li><p><strong>kwargs</strong> (<em>Any</em>)</p></li>
 </ul>
@@ -879,78 +847,6 @@ below a maximum number of pulses if n_pulses is over the limit.</p>
 </dd>
 </dl>
 </dd></dl>
-<dl class="py class">
-<dt class="sig sig-object py" id="graphnet.models.graphs.nodes.nodes.Cluster">
-<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">graphnet.models.graphs.nodes.nodes.</span></span><span class="sig-name descname"><span class="pre">Cluster</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/graphnet/models/graphs/nodes/nodes.html#Cluster"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#graphnet.models.graphs.nodes.nodes.Cluster" title="Link to this definition">¶</a></dt>
-<dd><p>Bases: <a class="reference internal" href="#graphnet.models.graphs.nodes.nodes.NodeDefinition" title="graphnet.models.graphs.nodes.nodes.NodeDefinition"><code class="xref py py-class docutils literal notranslate"><span class="pre">NodeDefinition</span></code></a></p>
-<p>Represent nodes as clusters with summary node features.</p>
-<p>This class enables clustering of nodes based on specified coordinates
-(e.g., DOM x, y, z) and provides summarization of pulse information
-including charge, time, and other statistical features.</p>
-<p>The features that each cluster will have are calculated
-by subclasses of the <cite>ClusterFeature</cite> class
-Cluster features can include:
-- Percentiles
-- Total sum
-- Cumulative values after certain times
-- Time of specific percentiles
-- Time of first pulse
-- Standard deviation
-- Spread of values
-- Counts of pulses</p>
-<dl class="simple">
-<dt>NOTE: The intend use is with a time feature that is used</dt><dd><p>to create some of the statistics.</p>
-</dd>
-</dl>
-<p>Initialize the Clusters class with various parameters.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>cluster_on</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code>[<code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>]</span>) – Feature names used to create clusters
-(e.g., [‘dom_x’, ‘dom_y’, ‘dom_z’]).</p></li>
-<li><p><strong>cluster_features</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code>[<a class="reference internal" href="graphnet.models.graphs.nodes.features.html#graphnet.models.graphs.nodes.features.ClusterFeature" title="graphnet.models.graphs.nodes.features.ClusterFeature"><code class="xref py py-class docutils literal notranslate"><span class="pre">ClusterFeature</span></code></a>]</span>) – List of ClusterFeature objects
-defining how features are summarized.</p></li>
-<li><p><strong>input_feature_names</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code>[<code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>]</span>) – Optional list of input feature column names.</p></li>
-<li><p><strong>time_label</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></span>, default: <code class="docutils literal notranslate"><span class="pre">'dom_time'</span></code>) – Name of the time feature column.
-Required for cumulative and time-based features.</p></li>
-<li><p><strong>reference_time_weight</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code></span>, default: <code class="docutils literal notranslate"><span class="pre">'charge'</span></code>) – Column name used as weight for
-calculating reference time as a weighted median.</p></li>
-<li><p><strong>args</strong> (<em>Any</em>)</p></li>
-<li><p><strong>kwargs</strong> (<em>Any</em>)</p></li>
-</ul>
-</dd>
-<dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><strong>AssertionError</strong> – If reference time weight is not in input feature names.</p>
-</dd>
-<dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p>object</p>
-</dd>
-</dl>
-<dl class="py method">
-<dt class="sig sig-object py" id="graphnet.models.graphs.nodes.nodes.Cluster.cluster_summarize">
-<span class="sig-name descname"><span class="pre">cluster_summarize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">t_ref</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/graphnet/models/graphs/nodes/nodes.html#Cluster.cluster_summarize"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#graphnet.models.graphs.nodes.nodes.Cluster.cluster_summarize" title="Link to this definition">¶</a></dt>
-<dd><p>Summarize cluster features for unique sensors.</p>
-<p>Processes input array by:
-- Identifying unique sensors
-- Subtracting reference time
-- Extracting time and feature information
-- Applying cluster feature summarization methods</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>x</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">array</span></code></span>) – Input numpy array of feature values</p></li>
-<li><p><strong>t_ref</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code></span>) – Reference time used for time normalization</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span></p>
-</dd>
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>numpy array with summarized cluster features</p>
-</dd>
-</dl>
-</dd></dl>
-</dd></dl>
 </section>
 
 
@@ -963,7 +859,7 @@ calculating reference time as a weighted median.</p></li>
     <div class="md-footer-nav">
       <nav class="md-footer-nav__inner md-grid">
           
-            <a href="graphnet.models.graphs.nodes.features.html" title="features"
+            <a href="graphnet.models.graphs.nodes.html" title="nodes"
                class="md-flex md-footer-nav__link md-footer-nav__link--prev"
                rel="prev">
               <div class="md-flex__cell md-flex__cell--shrink">
@@ -972,7 +868,7 @@ calculating reference time as a weighted median.</p></li>
               <div class="md-flex__cell md-flex__cell--stretch md-footer-nav__title">
                 <span class="md-flex__ellipsis">
                   <span
-                      class="md-footer-nav__direction"> "Previous" </span> features </span>
+                      class="md-footer-nav__direction"> "Previous" </span> nodes </span>
               </div>
             </a>
           

@@ -439,12 +439,6 @@
         <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.cluster_summarize_with_percentiles" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cluster_summarize_with_percentiles()</span></code></a>
         </li>
         <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.ice_transparency" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">ice_transparency()</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.weighted_median" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">weighted_median()</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.time_of_percentile" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">time_of_percentile()</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.cumulative_after_t" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cumulative_after_t()</span></code></a>
         </li></ul>
             </nav>
         </li>
@@ -483,27 +477,6 @@
     
     
       <a href="#graphnet.models.graphs.utils.ice_transparency" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">ice_transparency()</span></code></a>
-      
-    
-    </li>
-    <li class="md-nav__item">
-    
-    
-      <a href="#graphnet.models.graphs.utils.weighted_median" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">weighted_median()</span></code></a>
-      
-    
-    </li>
-    <li class="md-nav__item">
-    
-    
-      <a href="#graphnet.models.graphs.utils.time_of_percentile" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">time_of_percentile()</span></code></a>
-      
-    
-    </li>
-    <li class="md-nav__item">
-    
-    
-      <a href="#graphnet.models.graphs.utils.cumulative_after_t" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cumulative_after_t()</span></code></a>
       
     
     </li></ul>
@@ -631,12 +604,6 @@
         <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.cluster_summarize_with_percentiles" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cluster_summarize_with_percentiles()</span></code></a>
         </li>
         <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.ice_transparency" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">ice_transparency()</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.weighted_median" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">weighted_median()</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.time_of_percentile" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">time_of_percentile()</span></code></a>
-        </li>
-        <li class="md-nav__item"><a href="#graphnet.models.graphs.utils.cumulative_after_t" class="md-nav__link"><code class="docutils literal notranslate"><span class="pre">cumulative_after_t()</span></code></a>
         </li></ul>
             </nav>
         </li>
@@ -785,94 +752,6 @@ corresponding normalized absorption length.</p>
 </dd>
 <dt class="field-odd">Return type<span class="colon">:</span></dt>
 <dd class="field-odd"><p>f_scattering</p>
-</dd>
-</dl>
-</dd></dl>
-<dl class="py function">
-<dt class="sig sig-object py" id="graphnet.models.graphs.utils.weighted_median">
-<span class="sig-prename descclassname"><span class="pre">graphnet.models.graphs.utils.</span></span><span class="sig-name descname"><span class="pre">weighted_median</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">values</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/graphnet/models/graphs/utils.html#weighted_median"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#graphnet.models.graphs.utils.weighted_median" title="Link to this definition">¶</a></dt>
-<dd><p>Compute the weighted median of an array of values.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>values</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Array-like object containing the values for which
-the weighted median is to be computed.</p></li>
-<li><p><strong>weights</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">ndarray</span></code></span>) – Array-like object containing the weights corresponding
-to each value in <cite>values</cite>.</p></li>
-</ul>
-</dd>
-<dt class="field-even">Returns<span class="colon">:</span></dt>
-<dd class="field-even"><p>The computed weighted median of the input values.</p>
-</dd>
-<dt class="field-odd">Return type<span class="colon">:</span></dt>
-<dd class="field-odd"><p>float</p>
-</dd>
-<dt class="field-even">Raises<span class="colon">:</span></dt>
-<dd class="field-even"><p><strong>ValueError</strong> – If <cite>values</cite> and <cite>weights</cite> have different lengths or are empty.</p>
-</dd>
-</dl>
-</dd></dl>
-<dl class="py function">
-<dt class="sig sig-object py" id="graphnet.models.graphs.utils.time_of_percentile">
-<span class="sig-prename descclassname"><span class="pre">graphnet.models.graphs.utils.</span></span><span class="sig-name descname"><span class="pre">time_of_percentile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">time_arr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">value_arr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">percentiles</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/graphnet/models/graphs/utils.html#time_of_percentile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#graphnet.models.graphs.utils.time_of_percentile" title="Link to this definition">¶</a></dt>
-<dd><p>Get time values at specified percentiles of a cumulative sum.</p>
-<p>Using the time and value series provided in <cite>time_arr</cite> and <cite>value_arr</cite>,
-this function computes the cumulative sum of <cite>value_arr</cite> and identifies
-the time points at which the cumulative sum reaches or exceeds the
-specified percentiles. The result is useful for analyzing the distribution
-of cumulative values over time.</p>
-<p><strong>Example use-case</strong>:
-Suppose <cite>time_arr</cite> and <cite>value_arr</cite> represent time and charge values.
-Then this would give timing information about how quick the charge gets
-deposited in a cluster E.g. DOM.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>time_arr</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">array</span></code></span>) – Array of time values associated with measurements or events.
-Should be in ascending order.</p></li>
-<li><p><strong>value_arr</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">array</span></code></span>) – Array of values corresponding to each time point,
-USED TO compute the cumulative sum.</p></li>
-<li><p><strong>percentiles</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">list</span></code></span>) – List of percentile thresholds (ranging from 0 to 100)
-at which to evaluate the time values.</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">list</span></code></span></p>
-</dd>
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>List of time values at the specified percentiles.</p>
-</dd>
-</dl>
-</dd></dl>
-<dl class="py function">
-<dt class="sig sig-object py" id="graphnet.models.graphs.utils.cumulative_after_t">
-<span class="sig-prename descclassname"><span class="pre">graphnet.models.graphs.utils.</span></span><span class="sig-name descname"><span class="pre">cumulative_after_t</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">time_arr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">value_arr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">times</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/graphnet/models/graphs/utils.html#cumulative_after_t"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#graphnet.models.graphs.utils.cumulative_after_t" title="Link to this definition">¶</a></dt>
-<dd><p>Get cumulative value of <cite>value_arr</cite> at/after specified times.</p>
-<p>Using time points provided in <cite>times</cite>, this function calculates cumulative
-timeseries of <cite>value_arr</cite> at points occurring at time in <cite>time_arr</cite>.
-The cumulative sum is evaluated for each time in <cite>times</cite>, and the result
-is returned as a list of cumulative values.</p>
-<p><strong>Example use-case</strong>:
-Suppose <cite>time_arr</cite> and <cite>value_arr</cite> represent the time and charge collected
-in a DOM. You may want to determine the deposited charge at
-different time thresholds to analyze how much charge has been accumulated
-up to these times and use this as a Cluster Feature.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>time_arr</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">array</span></code></span>) – Array of time values associated with events.
-The first time value should be 0 so that every time value
-in <cite>times</cite> is just the time after the start.</p></li>
-<li><p><strong>value_arr</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">array</span></code></span>) – Array of values to be cumulatively summed.</p></li>
-<li><p><strong>times</strong> (<span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">List</span></code>[<code class="xref py py-class docutils literal notranslate"><span class="pre">float</span></code>]</span>) – List of time thresholds after which the cumulative sums
-are evaluated. All positive values.</p></li>
-</ul>
-</dd>
-<dt class="field-even">Return type<span class="colon">:</span></dt>
-<dd class="field-even"><p><span class="sphinx_autodoc_typehints-type"><code class="xref py py-class docutils literal notranslate"><span class="pre">list</span></code></span></p>
-</dd>
-<dt class="field-odd">Returns<span class="colon">:</span></dt>
-<dd class="field-odd"><p>List of cumulative sums evaluated at the specified times.</p>
 </dd>
 </dl>
 </dd></dl>
