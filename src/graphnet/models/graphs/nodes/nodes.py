@@ -8,12 +8,15 @@ from torch_geometric.data import Data
 
 from graphnet.utilities.decorators import final
 from graphnet.models import Model
+from graphnet.models.graphs.nodes import ClusterFeature
 from graphnet.models.graphs.utils import (
     cluster_summarize_with_percentiles,
     identify_indices,
     lex_sort,
     ice_transparency,
+    weighted_median,
 )
+
 from copy import deepcopy
 
 import numpy as np
@@ -238,11 +241,14 @@ class NodeAsDOMTimeSeries(NodeDefinition):
 
         Args:
             keys: Names of features in the data (in order).
-            id_columns: List of columns that uniquely identify a DOM.
-            time_column: Name of time column.
-            charge_column: Name of charge column.
-            max_activations: Maximum number of activations to include in
-                the time series.
+            id_columns:
+                List of columns that uniquely identify a DOM.
+            time_column:
+                Name of time column.
+            charge_column:
+                Name of charge column.
+            max_activations:
+                Maximum number of activations to include in the time series.
         """
         self._keys = keys
         super().__init__(input_feature_names=self._keys)
@@ -252,8 +258,9 @@ class NodeAsDOMTimeSeries(NodeDefinition):
             self._charge_index: Optional[int] = self._keys.index(charge_column)
         except ValueError:
             self.warning(
-                "Charge column with name {charge_column} not found. "
-                "Running without."
+                "Charge column with name {} not found. Running without".format(
+                    charge_column
+                )
             )
 
             self._charge_index = None
@@ -452,3 +459,268 @@ class IceMixNodes(NodeDefinition):
             graph[:event_length, idx] = x[ids, self.feature_indexes[feature]]
 
         return Data(x=graph)
+
+
+class Cluster(NodeDefinition):
+    """Represent nodes as clusters with summary node features.
+
+    This class enables clustering of nodes based on specified coordinates
+    (e.g., DOM x, y, z) and provides summarization of pulse information
+    including charge, time, and other statistical features.
+
+    The features that each cluster will have are calculated
+    by subclasses of the `ClusterFeature` class
+    Cluster features can include:
+    - Percentiles
+    - Total sum
+    - Cumulative values after certain times
+    - Time of specific percentiles
+    - Time of first pulse
+    - Standard deviation
+    - Spread of values
+    - Counts of pulses
+
+    NOTE: The intend use is with a time feature that is used
+        to create some of the statistics.
+    """
+
+    def __init__(
+        self,
+        cluster_on: List[str],
+        cluster_features: List[ClusterFeature],
+        input_feature_names: List[str],
+        time_label: str = "dom_time",
+        reference_time_weight: str = "charge",
+    ) -> None:
+        """Initialize the Clusters class with various parameters.
+
+        Args:
+            cluster_on:
+                Feature names used to create clusters
+                (e.g., ['dom_x', 'dom_y', 'dom_z']).
+            cluster_features:
+                List of ClusterFeature objects
+                defining how features are summarized.
+            input_feature_names:
+                Optional list of input feature column names.
+            time_label:
+                Name of the time feature column.
+                Required for cumulative and time-based features.
+            reference_time_weight:
+                Column name used as weight for
+                calculating reference time as a weighted median.
+
+        Raises:
+            AssertionError:
+                If reference time weight is not in input feature names.
+        """
+        self._cluster_on = cluster_on
+
+        assert isinstance(cluster_features, list)
+        for cf in cluster_features:
+            # NOTE: Need to fix this bug
+            # assert isinstance(cf, ClusterFeature), \
+            #     f"Expected ClusterFeature, got {type(cf)}" + \
+            #     str([cls.__name__ for cls in cf.__class__.mro()])
+            # Pass the time label to the Cluster Feature
+            cf._time_label = time_label
+        self._cluster_features = cluster_features
+
+        assert reference_time_weight in input_feature_names, (
+            f"The weight column has to be in '{input_feature_names}'"
+            + f"you gave '{reference_time_weight}'."
+        )
+        self._ref_time_weight = reference_time_weight
+        self._ref_time_idx = input_feature_names.index(self._ref_time_weight)
+
+        self._time_label = time_label
+
+        # Base class constructor
+        super().__init__(input_feature_names=input_feature_names)
+
+    def _define_output_feature_names(
+        self,
+        feature_names: List[str],
+    ) -> List[str]:
+        """Generate output feature names.
+
+        Performs feature selection and validation for cluster features.
+
+        Args:
+            feature_names: List of input feature names.
+
+        Returns:
+            List of new output feature names after clustering
+            and summarization.
+
+        Raises:
+            AssertionError: If selected features are invalid or empty.
+        """
+        # set some indices and get features for summarization
+        self._set_indices(feature_names)
+        # set features for ClusterFeatures and do checks
+        for cf in self._cluster_features:
+            cf._feature_selection(
+                infeatures=feature_names, time_label=self._time_label
+            )
+            assert set(cf._features).issubset(set(feature_names)), (
+                f"{cf} initialized with features: {cf._features}"
+                + f"availible features: {feature_names}. Not a subset"
+            )
+
+            assert len(cf._features) > 0, f"No features selected for {cf}"
+
+        # Construct list of final output features
+        new_feature_names = deepcopy(self._cluster_on)
+
+        for feature in self._features_for_summarization + [self._time_label]:
+            for cf in self._cluster_features:
+                if feature in cf._features:
+                    new_feature_names += cf._cf_labels(feature)
+
+        return new_feature_names
+
+    def _construct_nodes(self, x: torch.Tensor) -> Data:
+        """Construct graph nodes by calculating cluster features.
+
+        Args:
+            x: Input torch tensor containing feature values.
+
+        Returns:
+            Data object with summarized node features.
+
+        Raises:
+            AttributeError: If input feature names
+            were not properly set during initialization.
+
+        Process:
+        - Converts input tensor to numpy array
+        - Calculates reference time using weighted median
+        - Summarizes cluster features for unique nodes
+        """
+        # Cast to Numpy
+        x = x.numpy()
+
+        # Calculate the reference time
+        t_ref = weighted_median(
+            values=x[:, self._time_idx], weights=x[:, self._ref_time_idx]
+        )
+
+        # Construct clusters with percentile-summarized features
+        if hasattr(self, "_summarization_indices"):
+            array = self.cluster_summarize(
+                x=x,
+                t_ref=t_ref,
+            )
+        else:
+            self.error(
+                f"""{self.__class__.__name__} was not instatiated with
+                `input_feature_names` and has not been set later.
+                Please instantiate this class with `input_feature_names`
+                if you're using it outside `GraphDefinition`."""
+            )  # noqa
+            raise AttributeError
+
+        return Data(x=torch.tensor(array))
+
+    def _set_indices(
+        self,
+        feature_names: List[str],
+    ) -> None:
+        """Identify and set indices for clustering, time, and features.
+
+        Determines:
+        - Indices for clustering features
+        - Index for time label
+        - Indices for features to be summarized
+
+        Args:
+            feature_names: List of input feature names.
+
+        Sets the following attributes:
+        - _time_idx: Index of time label
+        - _cluster_indices: Indices of clustering features
+        - _summarization_indices: Indices of features to be summarized
+        - _features_for_summarization: Names of features to be summarized
+
+        Raises:
+            AssertionError: If time label index is not properly set.
+        """
+        features_for_summarization = []
+        summarization_indices = []
+        cluster_indices = []
+
+        for feature in feature_names:
+            feature_idx = feature_names.index(feature)
+
+            if feature not in self._cluster_on:
+                if feature == self._time_label:
+                    self._time_idx = feature_idx
+                else:
+                    features_for_summarization.append(feature)
+                    summarization_indices.append(feature_idx)
+            else:
+                cluster_indices.append(feature_idx)
+
+        assert hasattr(self, "_time_idx") and isinstance(
+            self._time_idx, int
+        ), f"Something went wrong with the time_label: {self._time_label}."
+
+        self._cluster_indices = cluster_indices
+        self._summarization_indices = summarization_indices
+        self._features_for_summarization = features_for_summarization
+
+    def cluster_summarize(
+        self,
+        x: np.array,
+        t_ref: float,
+    ) -> np.ndarray:
+        """Summarize cluster features for unique sensors.
+
+        Processes input array by:
+        - Identifying unique sensors
+        - Subtracting reference time
+        - Extracting time and feature information
+        - Applying cluster feature summarization methods
+
+        Args:
+            x: Input numpy array of feature values
+            t_ref: Reference time used for time normalization
+
+        Returns:
+            numpy array with summarized cluster features
+        """
+        # Calculate clusters and counts
+        unique_sensors = np.unique(x[:, self._cluster_indices], axis=0)
+
+        # subtract the ref_time
+        x[:, self._time_idx] = x[:, self._time_idx] - t_ref
+
+        arr = []
+        for i, sensor in enumerate(unique_sensors):
+            row = []
+            # get the array only for the current sensor
+            mask = np.all(x[:, self._cluster_indices] == sensor, axis=1)
+            temp = x[mask]
+            time_arr = temp[:, self._time_idx]
+
+            # loop through summarization features
+            for idx, feature in zip(
+                self._summarization_indices + [self._time_idx],
+                self._features_for_summarization + [self._time_label],
+            ):
+
+                val_arr = temp[:, idx]
+
+                for cf in self._cluster_features:
+                    row += cf._get_feature(
+                        infeature=feature,
+                        time_arr=time_arr,
+                        value_arr=val_arr,
+                        t_ref=t_ref,
+                    )
+            print(row)
+            arr.append(row)
+
+        arr = np.hstack([unique_sensors, arr])
+        return arr

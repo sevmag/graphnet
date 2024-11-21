@@ -173,7 +173,8 @@ def cluster_summarize_with_percentiles(
 
 
 def ice_transparency(
-    z_offset: Optional[float] = None, z_scaling: Optional[float] = None
+    z_offset: Optional[float] = None,
+    z_scaling: Optional[float] = None,
 ) -> Tuple[interp1d, interp1d]:
     """Return interpolation functions for optical properties of IceCube.
 
@@ -207,3 +208,131 @@ def ice_transparency(
     f_scattering = interp1d(df["z_norm"], df["scattering_len_norm"])
     f_absorption = interp1d(df["z_norm"], df["absorption_len_norm"])
     return f_scattering, f_absorption
+
+
+def weighted_median(
+    values: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """Compute the weighted median of an array of values.
+
+    Args:
+        values: Array-like object containing the values for which
+            the weighted median is to be computed.
+        weights: Array-like object containing the weights corresponding
+            to each value in `values`.
+
+    Returns:
+        float: The computed weighted median of the input values.
+
+    Raises:
+        ValueError:
+            If `values` and `weights` have different lengths or are empty.
+    """
+    # Convert input values and weights to numpy arrays
+    values = np.array(values)
+    weights = np.array(weights)
+
+    # Get the indices that would sort the array
+    sort_indices = np.argsort(values)
+
+    # Sort values and weights according to the sorted indices
+    values_sorted = values[sort_indices]
+    weights_sorted = weights[sort_indices]
+
+    # Compute the cumulative sum of the sorted weights
+    cumsum = weights_sorted.cumsum()
+
+    # Calculate the cutoff as half of the total weight sum
+    cutoff = weights_sorted.sum() / 2.0
+
+    # Return the smallest value for which the cumulative sum is greater
+    # than or equal to the cutoff
+    return values_sorted[cumsum >= cutoff][0]
+
+
+def time_of_percentile(
+    time_arr: np.array,
+    value_arr: np.array,
+    percentiles: list,
+) -> list:
+    """Get time values at specified percentiles of a cumulative sum.
+
+    Using the time and value series provided in `time_arr` and `value_arr`,
+    this function computes the cumulative sum of `value_arr` and identifies
+    the time points at which the cumulative sum reaches or exceeds the
+    specified percentiles. The result is useful for analyzing the distribution
+    of cumulative values over time.
+
+    **Example use-case**:
+    Suppose `time_arr` and `value_arr` represent time and charge values.
+    Then this would give timing information about how quick the charge gets
+    deposited in a cluster E.g. DOM.
+
+    Args:
+        time_arr: Array of time values associated with measurements or events.
+            Should be in ascending order.
+        value_arr: Array of values corresponding to each time point,
+            USED TO compute the cumulative sum.
+        percentiles: List of percentile thresholds (ranging from 0 to 100)
+            at which to evaluate the time values.
+
+    Returns:
+        List of time values at the specified percentiles.
+    """
+    ret = []
+    assert (
+        time_arr.shape == value_arr.shape
+    ), f"Time array: {time_arr.shape}, Value array: {value_arr.shape}"
+    cumulative = np.cumsum(value_arr)
+    pct_values = np.percentile(
+        cumulative,
+        percentiles,
+    ).tolist()
+    for pct in pct_values:
+        idx = np.where(cumulative - pct >= 0, cumulative, np.inf).argmin()
+        ret.append(time_arr[idx])
+
+    return ret
+
+
+def cumulative_after_t(
+    time_arr: np.array,
+    value_arr: np.array,
+    times: List[float],
+) -> list:
+    """Get cumulative value of `value_arr` at/after specified times.
+
+    Using time points provided in `times`, this function calculates cumulative
+    timeseries of `value_arr` at points occurring at time in `time_arr`.
+    The cumulative sum is evaluated for each time in `times`, and the result
+    is returned as a list of cumulative values.
+
+    **Example use-case**:
+    Suppose `time_arr` and `value_arr` represent the time and charge collected
+    in a DOM. You may want to determine the deposited charge at
+    different time thresholds to analyze how much charge has been accumulated
+    up to these times and use this as a Cluster Feature.
+
+    Args:
+        time_arr: Array of time values associated with events.
+            The first time value should be 0 so that every time value
+            in `times` is just the time after the start.
+        value_arr: Array of values to be cumulatively summed.
+        times: List of time thresholds after which the cumulative sums
+               are evaluated. All positive values.
+
+    Returns:
+        List of cumulative sums evaluated at the specified times.
+    """
+    assert (
+        time_arr.shape == value_arr.shape
+    ), f"Time array: {time_arr.shape}, Value array: {value_arr.shape}"
+    ret = []
+    for t in times:
+        if t > time_arr.max():
+            ret.append(np.cumsum(value_arr).max())
+        else:
+            idx = np.where(time_arr - t >= 0, time_arr, np.inf).argmin()
+            ret.append(np.cumsum(value_arr)[idx])
+    return ret
