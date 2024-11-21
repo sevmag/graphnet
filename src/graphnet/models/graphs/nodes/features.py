@@ -350,7 +350,7 @@ class Std(ClusterFeature):
 
 
 class Spread(ClusterFeature):
-    """NEED TO IMPLEMENT."""
+    """NEED TO IMPLEMENT STILL."""
 
     def __init__(
         self,
