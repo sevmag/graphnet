@@ -15,6 +15,7 @@ nodes
 .. toctree::
    :maxdepth: 2
 
+   graphnet.models.graphs.nodes.features
    graphnet.models.graphs.nodes.nodes
 
 

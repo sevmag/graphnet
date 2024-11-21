@@ -359,12 +359,15 @@
 
 <span class="kn">from</span> <span class="nn">graphnet.utilities.decorators</span> <span class="kn">import</span> <span class="n">final</span>
 <span class="kn">from</span> <span class="nn">graphnet.models</span> <span class="kn">import</span> <span class="n">Model</span>
+<span class="kn">from</span> <span class="nn">graphnet.models.graphs.nodes</span> <span class="kn">import</span> <span class="n">ClusterFeature</span>
 <span class="kn">from</span> <span class="nn">graphnet.models.graphs.utils</span> <span class="kn">import</span> <span class="p">(</span>
     <span class="n">cluster_summarize_with_percentiles</span><span class="p">,</span>
     <span class="n">identify_indices</span><span class="p">,</span>
     <span class="n">lex_sort</span><span class="p">,</span>
     <span class="n">ice_transparency</span><span class="p">,</span>
+    <span class="n">weighted_median</span><span class="p">,</span>
 <span class="p">)</span>
+
 <span class="kn">from</span> <span class="nn">copy</span> <span class="kn">import</span> <span class="n">deepcopy</span>
 
 <span class="kn">import</span> <span class="nn">numpy</span> <span class="k">as</span> <span class="nn">np</span>
@@ -609,11 +612,14 @@
 
 <span class="sd">        Args:</span>
 <span class="sd">            keys: Names of features in the data (in order).</span>
-<span class="sd">            id_columns: List of columns that uniquely identify a DOM.</span>
-<span class="sd">            time_column: Name of time column.</span>
-<span class="sd">            charge_column: Name of charge column.</span>
-<span class="sd">            max_activations: Maximum number of activations to include in</span>
-<span class="sd">                the time series.</span>
+<span class="sd">            id_columns:</span>
+<span class="sd">                List of columns that uniquely identify a DOM.</span>
+<span class="sd">            time_column:</span>
+<span class="sd">                Name of time column.</span>
+<span class="sd">            charge_column:</span>
+<span class="sd">                Name of charge column.</span>
+<span class="sd">            max_activations:</span>
+<span class="sd">                Maximum number of activations to include in the time series.</span>
 <span class="sd">        """</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_keys</span> <span class="o">=</span> <span class="n">keys</span>
         <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">input_feature_names</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_keys</span><span class="p">)</span>
@@ -623,8 +629,9 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">_charge_index</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_keys</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">charge_column</span><span class="p">)</span>
         <span class="k">except</span> <span class="ne">ValueError</span><span class="p">:</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
-                <span class="s2">"Charge column with name </span><span class="si">{charge_column}</span><span class="s2"> not found. "</span>
-                <span class="s2">"Running without."</span>
+                <span class="s2">"Charge column with name </span><span class="si">{}</span><span class="s2"> not found. Running without"</span><span class="o">.</span><span class="n">format</span><span class="p">(</span>
+                    <span class="n">charge_column</span>
+                <span class="p">)</span>
             <span class="p">)</span>
 
             <span class="bp">self</span><span class="o">.</span><span class="n">_charge_index</span> <span class="o">=</span> <span class="kc">None</span>
@@ -826,6 +833,277 @@
             <span class="n">graph</span><span class="p">[:</span><span class="n">event_length</span><span class="p">,</span> <span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">x</span><span class="p">[</span><span class="n">ids</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">feature_indexes</span><span class="p">[</span><span class="n">feature</span><span class="p">]]</span>
 
         <span class="k">return</span> <span class="n">Data</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="n">graph</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="Cluster">
+<a class="viewcode-back" href="../../../../../api/graphnet.models.graphs.nodes.nodes.html#graphnet.models.graphs.nodes.nodes.Cluster">[docs]</a>
+<span class="k">class</span> <span class="nc">Cluster</span><span class="p">(</span><span class="n">NodeDefinition</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Represent nodes as clusters with summary node features.</span>
+
+<span class="sd">    This class enables clustering of nodes based on specified coordinates</span>
+<span class="sd">    (e.g., DOM x, y, z) and provides summarization of pulse information</span>
+<span class="sd">    including charge, time, and other statistical features.</span>
+
+<span class="sd">    The features that each cluster will have are calculated</span>
+<span class="sd">    by subclasses of the `ClusterFeature` class</span>
+<span class="sd">    Cluster features can include:</span>
+<span class="sd">    - Percentiles</span>
+<span class="sd">    - Total sum</span>
+<span class="sd">    - Cumulative values after certain times</span>
+<span class="sd">    - Time of specific percentiles</span>
+<span class="sd">    - Time of first pulse</span>
+<span class="sd">    - Standard deviation</span>
+<span class="sd">    - Spread of values</span>
+<span class="sd">    - Counts of pulses</span>
+
+<span class="sd">    NOTE: The intend use is with a time feature that is used</span>
+<span class="sd">        to create some of the statistics.</span>
+<span class="sd">    """</span>
+
+    <span class="k">def</span> <span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">cluster_on</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">cluster_features</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">ClusterFeature</span><span class="p">],</span>
+        <span class="n">input_feature_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="n">time_label</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"dom_time"</span><span class="p">,</span>
+        <span class="n">reference_time_weight</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"charge"</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Initialize the Clusters class with various parameters.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            cluster_on:</span>
+<span class="sd">                Feature names used to create clusters</span>
+<span class="sd">                (e.g., ['dom_x', 'dom_y', 'dom_z']).</span>
+<span class="sd">            cluster_features:</span>
+<span class="sd">                List of ClusterFeature objects</span>
+<span class="sd">                defining how features are summarized.</span>
+<span class="sd">            input_feature_names:</span>
+<span class="sd">                Optional list of input feature column names.</span>
+<span class="sd">            time_label:</span>
+<span class="sd">                Name of the time feature column.</span>
+<span class="sd">                Required for cumulative and time-based features.</span>
+<span class="sd">            reference_time_weight:</span>
+<span class="sd">                Column name used as weight for</span>
+<span class="sd">                calculating reference time as a weighted median.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            AssertionError:</span>
+<span class="sd">                If reference time weight is not in input feature names.</span>
+<span class="sd">        """</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_on</span> <span class="o">=</span> <span class="n">cluster_on</span>
+
+        <span class="k">assert</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">cluster_features</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">cf</span> <span class="ow">in</span> <span class="n">cluster_features</span><span class="p">:</span>
+            <span class="c1"># NOTE: Need to fix this bug</span>
+            <span class="c1"># assert isinstance(cf, ClusterFeature), \</span>
+            <span class="c1">#     f"Expected ClusterFeature, got {type(cf)}" + \</span>
+            <span class="c1">#     str([cls.__name__ for cls in cf.__class__.mro()])</span>
+            <span class="c1"># Pass the time label to the Cluster Feature</span>
+            <span class="n">cf</span><span class="o">.</span><span class="n">_time_label</span> <span class="o">=</span> <span class="n">time_label</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_features</span> <span class="o">=</span> <span class="n">cluster_features</span>
+
+        <span class="k">assert</span> <span class="n">reference_time_weight</span> <span class="ow">in</span> <span class="n">input_feature_names</span><span class="p">,</span> <span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"The weight column has to be in '</span><span class="si">{</span><span class="n">input_feature_names</span><span class="si">}</span><span class="s2">'"</span>
+            <span class="o">+</span> <span class="sa">f</span><span class="s2">"you gave '</span><span class="si">{</span><span class="n">reference_time_weight</span><span class="si">}</span><span class="s2">'."</span>
+        <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ref_time_weight</span> <span class="o">=</span> <span class="n">reference_time_weight</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_ref_time_idx</span> <span class="o">=</span> <span class="n">input_feature_names</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_ref_time_weight</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_time_label</span> <span class="o">=</span> <span class="n">time_label</span>
+
+        <span class="c1"># Base class constructor</span>
+        <span class="nb">super</span><span class="p">()</span><span class="o">.</span><span class="fm">__init__</span><span class="p">(</span><span class="n">input_feature_names</span><span class="o">=</span><span class="n">input_feature_names</span><span class="p">)</span>
+
+    <span class="k">def</span> <span class="nf">_define_output_feature_names</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">feature_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">"""Generate output feature names.</span>
+
+<span class="sd">        Performs feature selection and validation for cluster features.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            feature_names: List of input feature names.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            List of new output feature names after clustering</span>
+<span class="sd">            and summarization.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            AssertionError: If selected features are invalid or empty.</span>
+<span class="sd">        """</span>
+        <span class="c1"># set some indices and get features for summarization</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_set_indices</span><span class="p">(</span><span class="n">feature_names</span><span class="p">)</span>
+        <span class="c1"># set features for ClusterFeatures and do checks</span>
+        <span class="k">for</span> <span class="n">cf</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_features</span><span class="p">:</span>
+            <span class="n">cf</span><span class="o">.</span><span class="n">_feature_selection</span><span class="p">(</span>
+                <span class="n">infeatures</span><span class="o">=</span><span class="n">feature_names</span><span class="p">,</span> <span class="n">time_label</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_time_label</span>
+            <span class="p">)</span>
+            <span class="k">assert</span> <span class="nb">set</span><span class="p">(</span><span class="n">cf</span><span class="o">.</span><span class="n">_features</span><span class="p">)</span><span class="o">.</span><span class="n">issubset</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">feature_names</span><span class="p">)),</span> <span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">cf</span><span class="si">}</span><span class="s2"> initialized with features: </span><span class="si">{</span><span class="n">cf</span><span class="o">.</span><span class="n">_features</span><span class="si">}</span><span class="s2">"</span>
+                <span class="o">+</span> <span class="sa">f</span><span class="s2">"availible features: </span><span class="si">{</span><span class="n">feature_names</span><span class="si">}</span><span class="s2">. Not a subset"</span>
+            <span class="p">)</span>
+
+            <span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">cf</span><span class="o">.</span><span class="n">_features</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"No features selected for </span><span class="si">{</span><span class="n">cf</span><span class="si">}</span><span class="s2">"</span>
+
+        <span class="c1"># Construct list of final output features</span>
+        <span class="n">new_feature_names</span> <span class="o">=</span> <span class="n">deepcopy</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_cluster_on</span><span class="p">)</span>
+
+        <span class="k">for</span> <span class="n">feature</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_features_for_summarization</span> <span class="o">+</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_time_label</span><span class="p">]:</span>
+            <span class="k">for</span> <span class="n">cf</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_features</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">feature</span> <span class="ow">in</span> <span class="n">cf</span><span class="o">.</span><span class="n">_features</span><span class="p">:</span>
+                    <span class="n">new_feature_names</span> <span class="o">+=</span> <span class="n">cf</span><span class="o">.</span><span class="n">_cf_labels</span><span class="p">(</span><span class="n">feature</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">new_feature_names</span>
+
+    <span class="k">def</span> <span class="nf">_construct_nodes</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Data</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Construct graph nodes by calculating cluster features.</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            x: Input torch tensor containing feature values.</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            Data object with summarized node features.</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            AttributeError: If input feature names</span>
+<span class="sd">            were not properly set during initialization.</span>
+
+<span class="sd">        Process:</span>
+<span class="sd">        - Converts input tensor to numpy array</span>
+<span class="sd">        - Calculates reference time using weighted median</span>
+<span class="sd">        - Summarizes cluster features for unique nodes</span>
+<span class="sd">        """</span>
+        <span class="c1"># Cast to Numpy</span>
+        <span class="n">x</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+
+        <span class="c1"># Calculate the reference time</span>
+        <span class="n">t_ref</span> <span class="o">=</span> <span class="n">weighted_median</span><span class="p">(</span>
+            <span class="n">values</span><span class="o">=</span><span class="n">x</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span><span class="p">],</span> <span class="n">weights</span><span class="o">=</span><span class="n">x</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_ref_time_idx</span><span class="p">]</span>
+        <span class="p">)</span>
+
+        <span class="c1"># Construct clusters with percentile-summarized features</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"_summarization_indices"</span><span class="p">):</span>
+            <span class="n">array</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">cluster_summarize</span><span class="p">(</span>
+                <span class="n">x</span><span class="o">=</span><span class="n">x</span><span class="p">,</span>
+                <span class="n">t_ref</span><span class="o">=</span><span class="n">t_ref</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"""</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span><span class="si">}</span><span class="s2"> was not instatiated with</span>
+<span class="s2">                `input_feature_names` and has not been set later.</span>
+<span class="s2">                Please instantiate this class with `input_feature_names`</span>
+<span class="s2">                if you're using it outside `GraphDefinition`."""</span>
+            <span class="p">)</span>  <span class="c1"># noqa</span>
+            <span class="k">raise</span> <span class="ne">AttributeError</span>
+
+        <span class="k">return</span> <span class="n">Data</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">array</span><span class="p">))</span>
+
+    <span class="k">def</span> <span class="nf">_set_indices</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">feature_names</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Identify and set indices for clustering, time, and features.</span>
+
+<span class="sd">        Determines:</span>
+<span class="sd">        - Indices for clustering features</span>
+<span class="sd">        - Index for time label</span>
+<span class="sd">        - Indices for features to be summarized</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            feature_names: List of input feature names.</span>
+
+<span class="sd">        Sets the following attributes:</span>
+<span class="sd">        - _time_idx: Index of time label</span>
+<span class="sd">        - _cluster_indices: Indices of clustering features</span>
+<span class="sd">        - _summarization_indices: Indices of features to be summarized</span>
+<span class="sd">        - _features_for_summarization: Names of features to be summarized</span>
+
+<span class="sd">        Raises:</span>
+<span class="sd">            AssertionError: If time label index is not properly set.</span>
+<span class="sd">        """</span>
+        <span class="n">features_for_summarization</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">summarization_indices</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="n">cluster_indices</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="k">for</span> <span class="n">feature</span> <span class="ow">in</span> <span class="n">feature_names</span><span class="p">:</span>
+            <span class="n">feature_idx</span> <span class="o">=</span> <span class="n">feature_names</span><span class="o">.</span><span class="n">index</span><span class="p">(</span><span class="n">feature</span><span class="p">)</span>
+
+            <span class="k">if</span> <span class="n">feature</span> <span class="ow">not</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_on</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">feature</span> <span class="o">==</span> <span class="bp">self</span><span class="o">.</span><span class="n">_time_label</span><span class="p">:</span>
+                    <span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span> <span class="o">=</span> <span class="n">feature_idx</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">features_for_summarization</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">feature</span><span class="p">)</span>
+                    <span class="n">summarization_indices</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">feature_idx</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">cluster_indices</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">feature_idx</span><span class="p">)</span>
+
+        <span class="k">assert</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"_time_idx"</span><span class="p">)</span> <span class="ow">and</span> <span class="nb">isinstance</span><span class="p">(</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span><span class="p">,</span> <span class="nb">int</span>
+        <span class="p">),</span> <span class="sa">f</span><span class="s2">"Something went wrong with the time_label: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_time_label</span><span class="si">}</span><span class="s2">."</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_indices</span> <span class="o">=</span> <span class="n">cluster_indices</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_summarization_indices</span> <span class="o">=</span> <span class="n">summarization_indices</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_features_for_summarization</span> <span class="o">=</span> <span class="n">features_for_summarization</span>
+
+<div class="viewcode-block" id="Cluster.cluster_summarize">
+<a class="viewcode-back" href="../../../../../api/graphnet.models.graphs.nodes.nodes.html#graphnet.models.graphs.nodes.nodes.Cluster.cluster_summarize">[docs]</a>
+    <span class="k">def</span> <span class="nf">cluster_summarize</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">x</span><span class="p">:</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">,</span>
+        <span class="n">t_ref</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Summarize cluster features for unique sensors.</span>
+
+<span class="sd">        Processes input array by:</span>
+<span class="sd">        - Identifying unique sensors</span>
+<span class="sd">        - Subtracting reference time</span>
+<span class="sd">        - Extracting time and feature information</span>
+<span class="sd">        - Applying cluster feature summarization methods</span>
+
+<span class="sd">        Args:</span>
+<span class="sd">            x: Input numpy array of feature values</span>
+<span class="sd">            t_ref: Reference time used for time normalization</span>
+
+<span class="sd">        Returns:</span>
+<span class="sd">            numpy array with summarized cluster features</span>
+<span class="sd">        """</span>
+        <span class="c1"># Calculate clusters and counts</span>
+        <span class="n">unique_sensors</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">unique</span><span class="p">(</span><span class="n">x</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_indices</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+        <span class="c1"># subtract the ref_time</span>
+        <span class="n">x</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">x</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span><span class="p">]</span> <span class="o">-</span> <span class="n">t_ref</span>
+
+        <span class="n">arr</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">sensor</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">unique_sensors</span><span class="p">):</span>
+            <span class="n">row</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="c1"># get the array only for the current sensor</span>
+            <span class="n">mask</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">x</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_indices</span><span class="p">]</span> <span class="o">==</span> <span class="n">sensor</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="n">temp</span> <span class="o">=</span> <span class="n">x</span><span class="p">[</span><span class="n">mask</span><span class="p">]</span>
+            <span class="n">time_arr</span> <span class="o">=</span> <span class="n">temp</span><span class="p">[:,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span><span class="p">]</span>
+
+            <span class="c1"># loop through summarization features</span>
+            <span class="k">for</span> <span class="n">idx</span><span class="p">,</span> <span class="n">feature</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_summarization_indices</span> <span class="o">+</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_time_idx</span><span class="p">],</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">_features_for_summarization</span> <span class="o">+</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_time_label</span><span class="p">],</span>
+            <span class="p">):</span>
+
+                <span class="n">val_arr</span> <span class="o">=</span> <span class="n">temp</span><span class="p">[:,</span> <span class="n">idx</span><span class="p">]</span>
+
+                <span class="k">for</span> <span class="n">cf</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cluster_features</span><span class="p">:</span>
+                    <span class="n">row</span> <span class="o">+=</span> <span class="n">cf</span><span class="o">.</span><span class="n">_get_feature</span><span class="p">(</span>
+                        <span class="n">infeature</span><span class="o">=</span><span class="n">feature</span><span class="p">,</span>
+                        <span class="n">time_arr</span><span class="o">=</span><span class="n">time_arr</span><span class="p">,</span>
+                        <span class="n">value_arr</span><span class="o">=</span><span class="n">val_arr</span><span class="p">,</span>
+                        <span class="n">t_ref</span><span class="o">=</span><span class="n">t_ref</span><span class="p">,</span>
+                    <span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="n">row</span><span class="p">)</span>
+            <span class="n">arr</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">row</span><span class="p">)</span>
+
+        <span class="n">arr</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">hstack</span><span class="p">([</span><span class="n">unique_sensors</span><span class="p">,</span> <span class="n">arr</span><span class="p">])</span>
+        <span class="k">return</span> <span class="n">arr</span></div>
+</div>
 
 </pre></div>
 
