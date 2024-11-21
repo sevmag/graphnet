@@ -10,7 +10,7 @@ from graphnet.utilities.decorators import final
 from graphnet.models import Model
 from graphnet.models.graphs.nodes import ClusterFeature
 from graphnet.models.graphs.utils import (
-    cluster_summarize_with_percentiles,
+    cluster_and_pad,
     identify_indices,
     lex_sort,
     ice_transparency,
@@ -201,13 +201,14 @@ class PercentileClusters(NodeDefinition):
         x = x.numpy()
         # Construct clusters with percentile-summarized features
         if hasattr(self, "_summarization_indices"):
-            array = cluster_summarize_with_percentiles(
-                x=x,
-                summarization_indices=self._summarization_indices,
-                cluster_indices=self._cluster_indices,
-                percentiles=self._percentiles,
-                add_counts=self._add_counts,
+            cluster_class = cluster_and_pad(
+                x=x, cluster_columns=self._cluster_indices
             )
+            array = cluster_class.add_percentile_summary(
+                summarization_indices=self._summarization_indices,
+                percentiles=self._percentiles,
+            )
+            array = cluster_class.add_counts()
         else:
             self.error(
                 f"""{self.__class__.__name__} was not instatiated with
@@ -241,14 +242,11 @@ class NodeAsDOMTimeSeries(NodeDefinition):
 
         Args:
             keys: Names of features in the data (in order).
-            id_columns:
-                List of columns that uniquely identify a DOM.
-            time_column:
-                Name of time column.
-            charge_column:
-                Name of charge column.
-            max_activations:
-                Maximum number of activations to include in the time series.
+            id_columns: List of columns that uniquely identify a DOM.
+            time_column: Name of time column.
+            charge_column: Name of charge column.
+            max_activations: Maximum number of activations to include in
+                the time series.
         """
         self._keys = keys
         super().__init__(input_feature_names=self._keys)
@@ -258,9 +256,8 @@ class NodeAsDOMTimeSeries(NodeDefinition):
             self._charge_index: Optional[int] = self._keys.index(charge_column)
         except ValueError:
             self.warning(
-                "Charge column with name {} not found. Running without".format(
-                    charge_column
-                )
+                "Charge column with name {charge_column} not found. "
+                "Running without."
             )
 
             self._charge_index = None
