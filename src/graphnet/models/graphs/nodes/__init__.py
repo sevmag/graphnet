@@ -1,4 +1,4 @@
-"""Modules for constructing graphs.
+"""Modules for constructing nodes of graphs.
 
 ´GraphDefinition´ defines the nodes and their features,  and contains general
 graph-manipulation.´EdgeDefinition´ defines how edges are drawn between nodes
@@ -17,7 +17,6 @@ from .features import (
     TimeOfFirstPulse,
     AddCounts,
 )
-
 
 from .nodes import (
     NodeDefinition,
