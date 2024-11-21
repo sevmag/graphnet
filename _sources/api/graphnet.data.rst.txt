@@ -1,0 +1,55 @@
+
+data
+====
+
+
+.. automodule:: graphnet.data
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+
+|start-h2| Subpackages |end-h2|
+
+.. toctree::
+   :maxdepth: 2
+
+   graphnet.data.dataset
+   graphnet.data.extractors
+   graphnet.data.parquet
+   graphnet.data.pre_configured
+   graphnet.data.readers
+   graphnet.data.sqlite
+   graphnet.data.utilities
+   graphnet.data.writers
+
+|start-h2| Submodules |end-h2|
+
+
+.. toctree::
+   :maxdepth: 2
+
+   graphnet.data.constants
+   graphnet.data.curated_datamodule
+   graphnet.data.dataclasses
+   graphnet.data.dataconverter
+   graphnet.data.dataloader
+   graphnet.data.datamodule
+
+
+
+.. |start-h2| raw:: html
+
+     <h2>
+
+.. |end-h2| raw:: html
+
+     </h2>
+
+.. |start-h3| raw:: html
+
+     <h3>
+
+.. |end-h3| raw:: html
+
+     </h3>
