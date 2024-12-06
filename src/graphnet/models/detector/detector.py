@@ -82,7 +82,6 @@ class Detector(Model):
         feature_map = self.feature_map()
         if self._replace_with_identity is not None:
             for feature in self._replace_with_identity:
-                print(f"The follwoing feature is left unscaled: {feature}")
                 assert (
                     feature in feature_map.keys()
                 ), f"The feature '{feature}' is not in the feature_map"
