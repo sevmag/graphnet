@@ -323,7 +323,10 @@ class GraphDefinition(Model):
             for feature in self._detector.sensor_position_names
         ]
         idx = [*zip(*[tuple(input_features[:, k]) for k in lookup_columns])]
-        return self._detector.geometry_table.loc[idx, :].index
+        matching_rows = self._detector.geometry_table.index.to_frame().apply(
+            lambda row: np.allclose(row.values, idx, rtol=1e-5), axis=1
+        )
+        return self._detector.geometry_table.loc[matching_rows, :].index
 
     def _validate_input(
         self, input_features: np.array, input_feature_names: List[str]
