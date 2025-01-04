@@ -280,3 +280,32 @@ class ERDAHostedDataset(CuratedDataset):
             os.system(f"wget -O {file_path} {self._mirror}/{file_hash}")
             os.system(f"tar -xf {file_path} -C {self.dataset_dir}")
             os.system(f"rm {file_path}")
+
+
+class IceCubeHostedDataset(CuratedDataset):
+    """A base class for dataset/datamodule hosted on the IceCube cluster."""
+
+    _mirror = "https://convey.icecube.wisc.edu"
+    _tar_flags = ""
+
+    def prepare_data(self) -> None:
+        """Prepare the dataset for training."""
+        assert hasattr(self, "_zipped_files") and (len(self._zipped_files) > 0)
+        if os.path.exists(self.dataset_dir):
+            return
+        else:
+            USER = input("Username: ")
+            os.makedirs(self.dataset_dir)
+            for file in self._zipped_files:
+                # Download, unzip and delete zipped file
+                source_file_path = os.path.join(self._data_root_dir, file)
+                download_file_path = os.path.join(self.dataset_dir, file)
+                os.system(
+                    f"wget -P {self.dataset_dir} --user={USER} "
+                    + f"--ask-password {self._mirror}{source_file_path}"
+                )
+                os.system(
+                    f"tar -xzf {source_file_path} "
+                    + f"{self._tar_flags} -C {self.dataset_dir}"
+                )
+                os.system(f"rm {download_file_path}")
