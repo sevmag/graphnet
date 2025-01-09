@@ -296,11 +296,12 @@ class IceCubeHostedDataset(CuratedDataset):
         if files_to_dl == []:
             return
         USER = input("Username: ")
-        # os.makedirs(
-        #     self.dataset_dir,
-        #     # parents=True
-        # )
-        source_file_paths = " ".join([f"{self._mirror}{os.path.join(self._data_root_dir, f)}" for f in files_to_dl])
+        source_file_paths = " ".join(
+            [
+                f"{self._mirror}{os.path.join(self._data_root_dir, f)}"
+                for f in files_to_dl
+            ]
+        )
         os.system(
             f"wget -P {self.dataset_dir} --user={USER} "
             + f"--ask-password {source_file_paths}"
@@ -310,16 +311,15 @@ class IceCubeHostedDataset(CuratedDataset):
             unzip_dir = self._get_dir_name(file)
             os.makedirs(unzip_dir, exist_ok=True)
             os.system(
-                f"tar -xzf {file} "
-                + f"{self._tar_flags} -C {unzip_dir}"
+                f"tar -xzf {file} " + f"{self._tar_flags} -C {unzip_dir}"
             )
             os.system(f"rm {file}")
 
-    def _get_dir_name(self, source_file_path:str)->str:
-        file_name = os.path.basename(source_file_path).split('.')[0]
-        return str(os.path.join(self.dataset_dir,file_name))
+    def _get_dir_name(self, source_file_path: str) -> str:
+        file_name = os.path.basename(source_file_path).split(".")[0]
+        return str(os.path.join(self.dataset_dir, file_name))
 
-    def _resolve_downloads(self)->List[str]:
+    def _resolve_downloads(self) -> List[str]:
         if not os.path.exists(self.dataset_dir):
             return self._zipped_files
         dir_names = [self._get_dir_name(f) for f in self._zipped_files]
@@ -328,4 +328,3 @@ class IceCubeHostedDataset(CuratedDataset):
             if not os.path.exists(dir):
                 ret.append(self._zipped_files[i])
         return ret
-

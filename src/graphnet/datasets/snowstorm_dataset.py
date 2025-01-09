@@ -13,8 +13,6 @@ from graphnet.data.utilities import query_database
 from graphnet.models.graphs import GraphDefinition
 
 
-
-
 class SnowStormDataset(IceCubeHostedDataset):
     """IceCube SnowStorm simulation dataset.
 
@@ -26,8 +24,6 @@ class SnowStormDataset(IceCubeHostedDataset):
 
     _experiment = "IceCube SnowStorm dataset"
     _creator = "Severin Magel"
-    _event_counts = {}
-
     _citation = "arXiv:1909.01530"
     _available_backends = ["sqlite"]
     # Static Member Variables:
@@ -91,8 +87,9 @@ class SnowStormDataset(IceCubeHostedDataset):
         event_no = []
 
         # get set number
-        pattern = f"{re.escape(self.dataset_dir)}/(\d+)/.*"
-
+        pattern = rf"{re.escape(self.dataset_dir)}/(\d+)/.*"
+        self._event_counts: dict[str, int] = {}
+        self._event_counts = {}
         for path in dataset_paths:
             print(path)
 
@@ -106,16 +103,16 @@ class SnowStormDataset(IceCubeHostedDataset):
                 database=path,
                 query=f"SELECT event_no FROM {self._truth_table}",
             )
-            query_df['path'] = path
+            query_df["path"] = path
             event_no.append(query_df)
 
-            #save event count for description
+            # save event count for description
             if set_nb in self._event_counts:
                 self._event_counts[set_nb] += query_df.shape[0]
             else:
                 self._event_counts[set_nb] = query_df.shape[0]
 
-        event_no = pd.concat(event_no,axis=0)
+        event_no = pd.concat(event_no, axis=0)
 
         print(self._event_counts)
 
@@ -131,15 +128,17 @@ class SnowStormDataset(IceCubeHostedDataset):
 
         print(train_val.shape, test.shape)
 
-        train_val = train_val.groupby('path')
-        test = test.groupby('path')
+        train_val = train_val.groupby("path")
+        test = test.groupby("path")
 
         # parse into right format for CuratedDataset
         train_val_selection = []
         test_selection = []
         for path in dataset_paths:
-            train_val_selection.append(train_val['event_no'].get_group(path).tolist())
-            test_selection.append(test['event_no'].get_group(path).tolist())
+            train_val_selection.append(
+                train_val["event_no"].get_group(path).tolist()
+            )
+            test_selection.append(test["event_no"].get_group(path).tolist())
 
         print(len(train_val_selection))
         print(len(test_selection))
@@ -156,14 +155,20 @@ class SnowStormDataset(IceCubeHostedDataset):
         return dataset_args, train_val_selection, test_selection
 
     @classmethod
-    def _create_comment(cls):
+    def _create_comment(cls) -> None:
         """Print the number of events in each set."""
-        fixed_string = " Simulation produced by the IceCube Collaboration, " + \
-        "https://wiki.icecube.wisc.edu/index.php/SnowStorm_MC#File_Locations"
+        fixed_string = (
+            " Simulation produced by the IceCube Collaboration, "
+            + "https://wiki.icecube.wisc.edu/index.php/SnowStorm_MC#File_Locations"  # noqa: E501
+        )
         tot = 0
         set_string = ""
-        for k,v in cls._event_counts.items():
+        for k, v in cls._event_counts.items():
             set_string += f"\tSet {k} contains {v:10d} events\n"
             tot += v
         print(tot)
-        cls._comments = f"Contains ~{tot/1e6:.1f} million events:\n" + set_string + fixed_string
+        cls._comments = (
+            f"Contains ~{tot/1e6:.1f} million events:\n"
+            + set_string
+            + fixed_string
+        )
