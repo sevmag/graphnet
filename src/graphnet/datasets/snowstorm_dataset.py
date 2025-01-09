@@ -1,14 +1,18 @@
 """Snowstorm dataset module hosted on the IceCube Collaboration servers."""
 
-from graphnet.data.constants import FEATURES, TRUTH
-from typing import Dict, Any, Optional, List, Tuple, Union
-from graphnet.data.curated_datamodule import IceCubeHostedDataset
-from sklearn.model_selection import train_test_split
-from glob import glob
-from graphnet.data.utilities import query_database
+import pandas as pd
+import re
 import os
-from graphnet.training.labels import Direction, Track
+from typing import Dict, Any, Optional, List, Tuple, Union
+from glob import glob
+from sklearn.model_selection import train_test_split
+
+from graphnet.data.constants import FEATURES, TRUTH
+from graphnet.data.curated_datamodule import IceCubeHostedDataset
+from graphnet.data.utilities import query_database
 from graphnet.models.graphs import GraphDefinition
+
+
 
 
 class SnowStormDataset(IceCubeHostedDataset):
@@ -22,19 +26,16 @@ class SnowStormDataset(IceCubeHostedDataset):
 
     _experiment = "IceCube SnowStorm dataset"
     _creator = "Severin Magel"
-    _comments = (
-        "Contains ~X million track events."
-        " Simulation produced by the IceCube Collaboration, "
-        "https://wiki.icecube.wisc.edu/index.php/SnowStorm_MC#File_Locations"
-    )
-    _citation = None
+    _event_counts = {}
+
+    _citation = "arXiv:1909.01530"
     _available_backends = ["sqlite"]
     # Static Member Variables:
     _pulsemaps = ["SRTInIcePulses"]
     _truth_table = "truth"
     _pulse_truth = None
-    _features = FEATURES.ICECUBE86
-    _event_truth = TRUTH.ICECUBE86
+    _features = FEATURES.SNOWSTORM
+    _event_truth = TRUTH.SNOWSTORM
     _tar_flags = "--strip-components=4"
     _data_root_dir = "/data/ana/graphnet/Snowstorm_l2"
 
@@ -66,6 +67,8 @@ class SnowStormDataset(IceCubeHostedDataset):
             test_dataloader_kwargs=test_dataloader_kwargs,
         )
 
+        self._create_comment()
+
     def _prepare_args(
         self, backend: str, features: List[str], truth: List[str]
     ) -> Tuple[Dict[str, Any], Union[List[int], None], Union[List[int], None]]:
@@ -84,27 +87,62 @@ class SnowStormDataset(IceCubeHostedDataset):
         )
         print(dataset_paths)
 
-        train_val = []
-        test = []
+        # get event numbers from all datasets
+        event_no = []
+
+        # get set number
+        pattern = f"{re.escape(self.dataset_dir)}/(\d+)/.*"
 
         for path in dataset_paths:
             print(path)
-            event_nos = query_database(
+
+            # Extract the ID
+            match = re.search(pattern, path)
+            assert match
+            set_nb = match.group(1)
+            print(set_nb)
+
+            query_df = query_database(
                 database=path,
                 query=f"SELECT event_no FROM {self._truth_table}",
             )
-            train_val_temp, test_temp = train_test_split(
-                event_nos["event_no"].tolist(),
-                test_size=0.10,
-                random_state=42,
-                shuffle=True,
-            )
+            query_df['path'] = path
+            event_no.append(query_df)
 
-            train_val.extend(train_val_temp)
-            test.extend(test_temp)
+            #save event count for description
+            if set_nb in self._event_counts:
+                self._event_counts[set_nb] += query_df.shape[0]
+            else:
+                self._event_counts[set_nb] = query_df.shape[0]
 
-        print(len(train_val))
-        print(len(test))
+        event_no = pd.concat(event_no,axis=0)
+
+        print(self._event_counts)
+
+        print(event_no)
+
+        # split the non-unique event numbers into train/val and test
+        train_val, test = train_test_split(
+            event_no,
+            test_size=0.10,
+            random_state=42,
+            shuffle=True,
+        )
+
+        print(train_val.shape, test.shape)
+
+        train_val = train_val.groupby('path')
+        test = test.groupby('path')
+
+        # parse into right format for CuratedDataset
+        train_val_selection = []
+        test_selection = []
+        for path in dataset_paths:
+            train_val_selection.append(train_val['event_no'].get_group(path).tolist())
+            test_selection.append(test['event_no'].get_group(path).tolist())
+
+        print(len(train_val_selection))
+        print(len(test_selection))
 
         dataset_args = {
             "truth_table": self._truth_table,
@@ -113,15 +151,19 @@ class SnowStormDataset(IceCubeHostedDataset):
             "graph_definition": self._graph_definition,
             "features": features,
             "truth": truth,
-            "labels": {
-                "direction": Direction(
-                    azimuth_key="initial_state_azimuth",
-                    zenith_key="initial_state_zenith",
-                ),
-                "track": Track(
-                    pid_key="initial_state_type", interaction_key="interaction"
-                ),
-            },
         }
 
-        return dataset_args, train_val, test
+        return dataset_args, train_val_selection, test_selection
+
+    @classmethod
+    def _create_comment(cls):
+        """Print the number of events in each set."""
+        fixed_string = " Simulation produced by the IceCube Collaboration, " + \
+        "https://wiki.icecube.wisc.edu/index.php/SnowStorm_MC#File_Locations"
+        tot = 0
+        set_string = ""
+        for k,v in cls._event_counts.items():
+            set_string += f"\tSet {k} contains {v:10d} events\n"
+            tot += v
+        print(tot)
+        cls._comments = f"Contains ~{tot/1e6:.1f} million events:\n" + set_string + fixed_string

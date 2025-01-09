@@ -8,6 +8,7 @@ methods in GraphNeT.
 from typing import Dict, Any, Optional, List, Tuple, Union
 from abc import abstractmethod
 import os
+from glob import glob
 
 from .datamodule import GraphNeTDataModule
 from graphnet.models.graphs import GraphDefinition
@@ -291,21 +292,40 @@ class IceCubeHostedDataset(CuratedDataset):
     def prepare_data(self) -> None:
         """Prepare the dataset for training."""
         assert hasattr(self, "_zipped_files") and (len(self._zipped_files) > 0)
-        if os.path.exists(self.dataset_dir):
+        files_to_dl = self._resolve_downloads()
+        if files_to_dl == []:
             return
-        else:
-            USER = input("Username: ")
-            os.makedirs(self.dataset_dir)
-            for file in self._zipped_files:
-                # Download, unzip and delete zipped file
-                source_file_path = os.path.join(self._data_root_dir, file)
-                download_file_path = os.path.join(self.dataset_dir, file)
-                os.system(
-                    f"wget -P {self.dataset_dir} --user={USER} "
-                    + f"--ask-password {self._mirror}{source_file_path}"
-                )
-                os.system(
-                    f"tar -xzf {source_file_path} "
-                    + f"{self._tar_flags} -C {self.dataset_dir}"
-                )
-                os.system(f"rm {download_file_path}")
+        USER = input("Username: ")
+        # os.makedirs(
+        #     self.dataset_dir,
+        #     # parents=True
+        # )
+        source_file_paths = " ".join([f"{self._mirror}{os.path.join(self._data_root_dir, f)}" for f in files_to_dl])
+        os.system(
+            f"wget -P {self.dataset_dir} --user={USER} "
+            + f"--ask-password {source_file_paths}"
+        )
+
+        for file in glob(os.path.join(self.dataset_dir, "*.tar.gz")):
+            unzip_dir = self._get_dir_name(file)
+            os.makedirs(unzip_dir, exist_ok=True)
+            os.system(
+                f"tar -xzf {file} "
+                + f"{self._tar_flags} -C {unzip_dir}"
+            )
+            os.system(f"rm {file}")
+
+    def _get_dir_name(self, source_file_path:str)->str:
+        file_name = os.path.basename(source_file_path).split('.')[0]
+        return str(os.path.join(self.dataset_dir,file_name))
+
+    def _resolve_downloads(self)->List[str]:
+        if not os.path.exists(self.dataset_dir):
+            return self._zipped_files
+        dir_names = [self._get_dir_name(f) for f in self._zipped_files]
+        ret = []
+        for i, dir in enumerate(dir_names):
+            if not os.path.exists(dir):
+                ret.append(self._zipped_files[i])
+        return ret
+
