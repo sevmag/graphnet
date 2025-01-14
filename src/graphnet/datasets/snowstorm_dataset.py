@@ -47,10 +47,10 @@ class SnowStormDataset(IceCubeHostedDataset):
         test_dataloader_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """Initialize SnowStorm dataset."""
+        self._sets = sets
         self._zipped_files = [
             os.path.join(self._data_root_dir, f"{s}.tar.gz") for s in sets
         ]
-        print(self._zipped_files)
 
         super().__init__(
             graph_definition=graph_definition,
@@ -62,8 +62,6 @@ class SnowStormDataset(IceCubeHostedDataset):
             validation_dataloader_kwargs=validation_dataloader_kwargs,
             test_dataloader_kwargs=test_dataloader_kwargs,
         )
-
-        self._create_comment()
 
     def _prepare_args(
         self, backend: str, features: List[str], truth: List[str]
@@ -78,26 +76,26 @@ class SnowStormDataset(IceCubeHostedDataset):
         Returns: Dataset arguments, train/val selection, test selection
         """
         assert backend == "sqlite"
-        dataset_paths = glob(
-            os.path.join(self.dataset_dir, "**/*.db"), recursive=True
-        )
-        print(dataset_paths)
+        dataset_paths = []
+        for set in self._sets:
+            dataset_paths += glob(
+                os.path.join(self.dataset_dir, str(set), "**/*.db"),
+                recursive=True,
+            )
 
         # get event numbers from all datasets
         event_no = []
 
         # get set number
         pattern = rf"{re.escape(self.dataset_dir)}/(\d+)/.*"
-        self._event_counts: dict[str, int] = {}
-        self._event_counts = {}
+        event_counts: dict[str, int] = {}
+        event_counts = {}
         for path in dataset_paths:
-            print(path)
 
             # Extract the ID
             match = re.search(pattern, path)
             assert match
             set_nb = match.group(1)
-            print(set_nb)
 
             query_df = query_database(
                 database=path,
@@ -107,16 +105,12 @@ class SnowStormDataset(IceCubeHostedDataset):
             event_no.append(query_df)
 
             # save event count for description
-            if set_nb in self._event_counts:
-                self._event_counts[set_nb] += query_df.shape[0]
+            if set_nb in event_counts:
+                event_counts[set_nb] += query_df.shape[0]
             else:
-                self._event_counts[set_nb] = query_df.shape[0]
+                event_counts[set_nb] = query_df.shape[0]
 
         event_no = pd.concat(event_no, axis=0)
-
-        print(self._event_counts)
-
-        print(event_no)
 
         # split the non-unique event numbers into train/val and test
         train_val, test = train_test_split(
@@ -125,8 +119,6 @@ class SnowStormDataset(IceCubeHostedDataset):
             random_state=42,
             shuffle=True,
         )
-
-        print(train_val.shape, test.shape)
 
         train_val = train_val.groupby("path")
         test = test.groupby("path")
@@ -140,9 +132,6 @@ class SnowStormDataset(IceCubeHostedDataset):
             )
             test_selection.append(test["event_no"].get_group(path).tolist())
 
-        print(len(train_val_selection))
-        print(len(test_selection))
-
         dataset_args = {
             "truth_table": self._truth_table,
             "pulsemaps": self._pulsemaps,
@@ -152,10 +141,12 @@ class SnowStormDataset(IceCubeHostedDataset):
             "truth": truth,
         }
 
+        self._create_comment(event_counts)
+
         return dataset_args, train_val_selection, test_selection
 
     @classmethod
-    def _create_comment(cls) -> None:
+    def _create_comment(cls, event_counts: dict[str, int] = {}) -> None:
         """Print the number of events in each set."""
         fixed_string = (
             " Simulation produced by the IceCube Collaboration, "
@@ -163,10 +154,9 @@ class SnowStormDataset(IceCubeHostedDataset):
         )
         tot = 0
         set_string = ""
-        for k, v in cls._event_counts.items():
+        for k, v in event_counts.items():
             set_string += f"\tSet {k} contains {v:10d} events\n"
             tot += v
-        print(tot)
         cls._comments = (
             f"Contains ~{tot/1e6:.1f} million events:\n"
             + set_string
