@@ -26,13 +26,12 @@ class SnowStormDataset(IceCubeHostedDataset):
     _creator = "Severin Magel"
     _citation = "arXiv:1909.01530"
     _available_backends = ["sqlite"]
-    # Static Member Variables:
+
     _pulsemaps = ["SRTInIcePulses"]
     _truth_table = "truth"
     _pulse_truth = None
     _features = FEATURES.SNOWSTORM
     _event_truth = TRUTH.SNOWSTORM
-    _tar_flags = "--strip-components=4"
     _data_root_dir = "/data/ana/graphnet/Snowstorm_l2"
 
     def __init__(
@@ -66,15 +65,7 @@ class SnowStormDataset(IceCubeHostedDataset):
     def _prepare_args(
         self, backend: str, features: List[str], truth: List[str]
     ) -> Tuple[Dict[str, Any], Union[List[int], None], Union[List[int], None]]:
-        """Prepare arguments for dataset.
-
-        Args:
-            backend: backend of dataset. Either "parquet" or "sqlite".
-            features: List of features from user to use as input.
-            truth: List of event-level truth variables from user.
-
-        Returns: Dataset arguments, train/val selection, test selection
-        """
+        """Prepare arguments for dataset."""
         assert backend == "sqlite"
         dataset_paths = []
         for set in self._sets:
@@ -162,3 +153,7 @@ class SnowStormDataset(IceCubeHostedDataset):
             + set_string
             + fixed_string
         )
+
+    def _get_dir_name(self, source_file_path: str) -> str:
+        file_name = os.path.basename(source_file_path).split(".")[0]
+        return str(os.path.join(self.dataset_dir, file_name))

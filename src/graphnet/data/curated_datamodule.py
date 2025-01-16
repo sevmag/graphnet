@@ -284,42 +284,67 @@ class ERDAHostedDataset(CuratedDataset):
 
 
 class IceCubeHostedDataset(CuratedDataset):
-    """A base class for dataset/datamodule hosted on the IceCube cluster."""
+    """A base class for dataset/datamodule hosted on the IceCube cluster.
+
+    Inheriting subclasses will need to do:
+    - fill out the `_zipped_files` attribute, which
+        should be a list of paths to files that are compressed using `tar` with
+        extension ".tar.gz" and are stored on the IceCube Cluster in "/data/".
+    - implement the `_get_dir_name` method, which should return the
+        directory name where the files resulting from the unzipping of a
+        compressed file should end up.
+    """
 
     _mirror = "https://convey.icecube.wisc.edu"
-    _tar_flags = ""
 
     def prepare_data(self) -> None:
         """Prepare the dataset for training."""
         assert hasattr(self, "_zipped_files") and (len(self._zipped_files) > 0)
+
+        # Check which files still need to be downloaded
         files_to_dl = self._resolve_downloads()
         if files_to_dl == []:
             return
+
+        # Download files
         USER = input("Username: ")
         source_file_paths = " ".join(
-            [
-                f"{self._mirror}{os.path.join(self._data_root_dir, f)}"
-                for f in files_to_dl
-            ]
+            [f"{self._mirror}{f}" for f in files_to_dl]
         )
         os.system(
             f"wget -P {self.dataset_dir} --user={USER} "
             + f"--ask-password {source_file_paths}"
         )
 
+        # unzip files
         for file in glob(os.path.join(self.dataset_dir, "*.tar.gz")):
+            tmp_dir = os.path.join(self.dataset_dir, "tmp")
+            os.mkdir(tmp_dir)
+            os.system(f"tar -xzf {file} -C {tmp_dir}")
             unzip_dir = self._get_dir_name(file)
-            os.makedirs(unzip_dir, exist_ok=True)
-            os.system(
-                f"tar -xzf {file} " + f"{self._tar_flags} -C {unzip_dir}"
-            )
-            os.system(f"rm {file}")
+            os.makedirs(unzip_dir)
+            for db_file in glob(
+                os.path.join(tmp_dir, "**/*.db"), recursive=True
+            ):
+                os.system(f"mv {db_file} {unzip_dir}")
 
+            os.system(f"rm {file}")
+            os.system(f"rm -r {tmp_dir}")
+
+    @abstractmethod
     def _get_dir_name(self, source_file_path: str) -> str:
-        file_name = os.path.basename(source_file_path).split(".")[0]
-        return str(os.path.join(self.dataset_dir, file_name))
+        """Get directory name from source file path.
+
+        E.g. if `source_file_path` is "/data/set/file.tar.gz",
+        return os.path.join(self.dataset_dir, source_file_path.split("/")[-2])
+        to have 'set' as the directory name where all files resulting from the
+        unzipping of `source_file_path` end up. If no substrucutre is desired,
+        just return `self.dataset_dir`
+        """
+        raise NotImplementedError
 
     def _resolve_downloads(self) -> List[str]:
+        """Resolve which files still need to be downloaded."""
         if not os.path.exists(self.dataset_dir):
             return self._zipped_files
         dir_names = [self._get_dir_name(f) for f in self._zipped_files]
