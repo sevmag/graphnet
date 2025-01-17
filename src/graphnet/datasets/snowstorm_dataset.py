@@ -79,7 +79,7 @@ class SnowStormDataset(IceCubeHostedDataset):
 
         # get set number
         pattern = rf"{re.escape(self.dataset_dir)}/(\d+)/.*"
-        event_counts: dict[str, int] = {}
+        event_counts: Dict[str, int] = {}
         event_counts = {}
         for path in dataset_paths:
 
@@ -137,7 +137,7 @@ class SnowStormDataset(IceCubeHostedDataset):
         return dataset_args, train_val_selection, test_selection
 
     @classmethod
-    def _create_comment(cls, event_counts: dict[str, int] = {}) -> None:
+    def _create_comment(cls, event_counts: Dict[str, int] = {}) -> None:
         """Print the number of events in each set."""
         fixed_string = (
             " Simulation produced by the IceCube Collaboration, "
