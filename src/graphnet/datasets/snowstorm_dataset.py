@@ -36,7 +36,7 @@ class SnowStormDataset(IceCubeHostedDataset):
 
     def __init__(
         self,
-        sets: List[int],
+        run_ids: List[int],
         graph_definition: GraphDefinition,
         download_dir: str,
         truth: Optional[List[str]] = None,
@@ -46,9 +46,9 @@ class SnowStormDataset(IceCubeHostedDataset):
         test_dataloader_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """Initialize SnowStorm dataset."""
-        self._sets = sets
+        self._run_ids = run_ids
         self._zipped_files = [
-            os.path.join(self._data_root_dir, f"{s}.tar.gz") for s in sets
+            os.path.join(self._data_root_dir, f"{s}.tar.gz") for s in run_ids
         ]
 
         super().__init__(
@@ -68,16 +68,16 @@ class SnowStormDataset(IceCubeHostedDataset):
         """Prepare arguments for dataset."""
         assert backend == "sqlite"
         dataset_paths = []
-        for set in self._sets:
+        for rid in self._run_ids:
             dataset_paths += glob(
-                os.path.join(self.dataset_dir, str(set), "**/*.db"),
+                os.path.join(self.dataset_dir, str(rid), "**/*.db"),
                 recursive=True,
             )
 
         # get event numbers from all datasets
         event_no = []
 
-        # get set number
+        # get RunID
         pattern = rf"{re.escape(self.dataset_dir)}/(\d+)/.*"
         event_counts: Dict[str, int] = {}
         event_counts = {}
@@ -86,7 +86,7 @@ class SnowStormDataset(IceCubeHostedDataset):
             # Extract the ID
             match = re.search(pattern, path)
             assert match
-            set_nb = match.group(1)
+            run_id = match.group(1)
 
             query_df = query_database(
                 database=path,
@@ -96,10 +96,10 @@ class SnowStormDataset(IceCubeHostedDataset):
             event_no.append(query_df)
 
             # save event count for description
-            if set_nb in event_counts:
-                event_counts[set_nb] += query_df.shape[0]
+            if run_id in event_counts:
+                event_counts[run_id] += query_df.shape[0]
             else:
-                event_counts[set_nb] = query_df.shape[0]
+                event_counts[run_id] = query_df.shape[0]
 
         event_no = pd.concat(event_no, axis=0)
 
@@ -138,19 +138,19 @@ class SnowStormDataset(IceCubeHostedDataset):
 
     @classmethod
     def _create_comment(cls, event_counts: Dict[str, int] = {}) -> None:
-        """Print the number of events in each set."""
+        """Print the number of events in each RunID."""
         fixed_string = (
             " Simulation produced by the IceCube Collaboration, "
             + "https://wiki.icecube.wisc.edu/index.php/SnowStorm_MC#File_Locations"  # noqa: E501
         )
         tot = 0
-        set_string = ""
+        runid_string = ""
         for k, v in event_counts.items():
-            set_string += f"\tSet {k} contains {v:10d} events\n"
+            runid_string += f"RunID {k} contains {v:10d} events\n"
             tot += v
         cls._comments = (
             f"Contains ~{tot/1e6:.1f} million events:\n"
-            + set_string
+            + runid_string
             + fixed_string
         )
 
