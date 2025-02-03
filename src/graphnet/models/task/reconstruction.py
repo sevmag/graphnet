@@ -248,3 +248,15 @@ class VisibleInelasticityReconstruction(StandardLearnedTask):
     def _forward(self, x: Tensor) -> Tensor:
         # Transform output to unit range
         return 0.5 * (torch.tanh(2.0 * x) + 1.0)
+
+
+class CustomEnergyReconstruction(StandardLearnedTask):
+    """Reconstructs energy using stable method."""
+
+    # Requires one feature: untransformed energy
+    default_target_labels = ["energy"]
+    default_prediction_labels = ["energy_pred"]
+    nb_inputs = 1
+
+    def _forward(self, x: Tensor) -> Tensor:
+        return x
