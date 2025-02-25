@@ -15,6 +15,7 @@ from torch import nn
 from torch.nn.functional import (
     one_hot,
     binary_cross_entropy,
+    binary_cross_entropy_with_logits,
     softplus,
 )
 
@@ -211,6 +212,19 @@ class BinaryCrossEntropyLoss(LossFunction):
 
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
         return binary_cross_entropy(
+            prediction.float(), target.float(), reduction="none"
+        )
+
+
+class BinaryCrossEntropyFromLogitsLoss(LossFunction):
+    """Compute binary cross entropy loss.
+
+    Predictions are vector logits (i.e., values can be anything), and targets
+    should be 0 and 1.
+    """
+
+    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        return binary_cross_entropy_with_logits(
             prediction.float(), target.float(), reduction="none"
         )
 
