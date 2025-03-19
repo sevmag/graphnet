@@ -635,7 +635,7 @@ class DOMSummaryFeatures(NodeDefinition):
                 :, -len(self._time_after_charge_pct) :
             ] *= self._time_standardization
 
-        return Data(x=torch.tensor(cluster_class.clustered_x))
+        return torch.tensor(cluster_class.clustered_x)
 
     def set_indeces(self, feature_names: List[str]) -> None:
         """Set the indices for the input features."""
