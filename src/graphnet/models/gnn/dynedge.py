@@ -35,6 +35,8 @@ class DynEdge(GNN):
         add_global_variables_after_pooling: bool = False,
         activation_layer: Optional[str] = None,
         add_norm_layer: bool = False,
+        conv_drop_out: Optional[float] = None,
+        readout_drop_out: Optional[float] = None,
         skip_readout: bool = False,
     ):
         """Construct `DynEdge`.
@@ -72,6 +74,8 @@ class DynEdge(GNN):
             activation_layer: The activation function to use in the model.
             add_norm_layer: Whether to add a normalization layer after each
                 linear layer.
+            conv_drop_out: The dropout rate to use in the convolution layers.
+            readout_drop_out: The dropout rate to use in the readout layers.
             skip_readout: Whether to skip the readout layer(s). If `True`, the
                 output of the last post-processing layer is returned directly.
         """
@@ -178,6 +182,8 @@ class DynEdge(GNN):
         self._features_subset = features_subset
         self._add_norm_layer = add_norm_layer
         self._skip_readout = skip_readout
+        self._conv_drop_out = conv_drop_out
+        self._readout_drop_out = readout_drop_out
 
         self._construct_layers()
 
@@ -202,6 +208,8 @@ class DynEdge(GNN):
                 if self._add_norm_layer:
                     layers.append(torch.nn.LayerNorm(nb_out))
                 layers.append(self._activation)
+                if self._conv_drop_out:
+                    layers.append(torch.nn.Dropout(self._conv_drop_out))
 
             conv_layer = DynEdgeConv(
                 torch.nn.Sequential(*layers),
@@ -228,7 +236,10 @@ class DynEdge(GNN):
             if self._add_norm_layer:
                 post_processing_layers.append(torch.nn.LayerNorm(nb_out))
             post_processing_layers.append(self._activation)
-
+            if self._readout_drop_out:
+                post_processing_layers.append(
+                    torch.nn.Dropout(self._readout_drop_out)
+                )
         self._post_processing = torch.nn.Sequential(*post_processing_layers)
 
         # Read-out operations
