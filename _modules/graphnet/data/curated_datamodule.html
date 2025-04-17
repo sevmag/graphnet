@@ -362,8 +362,13 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">glob</span><span class="w"> </span><span class="kn">import</span> <span class="n">glob</span>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">.datamodule</span><span class="w"> </span><span class="kn">import</span> <span class="n">GraphNeTDataModule</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">graphnet.models.graphs</span><span class="w"> </span><span class="kn">import</span> <span class="n">GraphDefinition</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">graphnet.models.data_representation</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">GraphDefinition</span><span class="p">,</span>
+    <span class="n">DataRepresentation</span><span class="p">,</span>
+<span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">graphnet.data.dataset</span><span class="w"> </span><span class="kn">import</span> <span class="n">ParquetDataset</span><span class="p">,</span> <span class="n">SQLiteDataset</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">graphnet.utilities.logging</span><span class="w"> </span><span class="kn">import</span> <span class="n">Logger</span>
 
 
 <div class="viewcode-block" id="CuratedDataset">
@@ -379,8 +384,9 @@
 
     <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
         <span class="bp">self</span><span class="p">,</span>
-        <span class="n">graph_definition</span><span class="p">:</span> <span class="n">GraphDefinition</span><span class="p">,</span>
         <span class="n">download_dir</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="n">data_representation</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">DataRepresentation</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">graph_definition</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">GraphDefinition</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">truth</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">features</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">List</span><span class="p">[</span><span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
         <span class="n">backend</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"parquet"</span><span class="p">,</span>
@@ -391,8 +397,10 @@
 <span class="w">        </span><span class="sd">"""Construct CuratedDataset.</span>
 
 <span class="sd">        Args:</span>
-<span class="sd">            graph_definition: Method that defines the data representation.</span>
 <span class="sd">            download_dir: Directory to download dataset to.</span>
+<span class="sd">            data_representation: Method that defines the data representation.</span>
+<span class="sd">            graph_definition: Method that defines the graph representation.</span>
+<span class="sd">                NOTE: DEPRECATED Use `data_representation` instead.</span>
 <span class="sd">            truth (Optional): List of event-level truth to include. Will</span>
 <span class="sd">                            include all available information if not given.</span>
 <span class="sd">            features (Optional): List of input features from pulsemap to use.</span>
@@ -407,9 +415,17 @@
 <span class="sd">            test_dataloader_kwargs (Optional): Arguments for the test</span>
 <span class="sd">                                    DataLoader. Default None.</span>
 <span class="sd">        """</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">data_representation</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">graph_definition</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">):</span>
+            <span class="n">data_representation</span> <span class="o">=</span> <span class="n">graph_definition</span>
+        <span class="k">elif</span> <span class="p">(</span><span class="n">data_representation</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">)</span> <span class="o">&amp;</span> <span class="p">(</span><span class="n">graph_definition</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">):</span>
+            <span class="c1"># Code stops</span>
+            <span class="k">raise</span> <span class="ne">TypeError</span><span class="p">(</span>
+                <span class="s2">"__init__() missing 1 required keyword argument:"</span>
+                <span class="s2">"'data_representation'"</span>
+            <span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_data_representation</span> <span class="o">=</span> <span class="n">data_representation</span>
         <span class="c1"># From user</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_download_dir</span> <span class="o">=</span> <span class="n">download_dir</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_graph_definition</span> <span class="o">=</span> <span class="n">graph_definition</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_backend</span> <span class="o">=</span> <span class="n">backend</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
 
         <span class="c1"># Checks</span>
@@ -437,6 +453,15 @@
             <span class="n">selection</span><span class="o">=</span><span class="n">selec</span><span class="p">,</span>
             <span class="n">test_selection</span><span class="o">=</span><span class="n">test_selec</span><span class="p">,</span>
         <span class="p">)</span>
+
+        <span class="k">if</span> <span class="n">graph_definition</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="c1"># Code continues after warning</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="s2">"DeprecationWarning: Argument `graph_definition` will be"</span>
+                <span class="s2">" deprecated in GraphNeT 2.0. Please use `data_representation`"</span>
+                <span class="s2">" instead."</span>
+                <span class="s2">""</span>
+            <span class="p">)</span>
 
 <div class="viewcode-block" id="CuratedDataset.prepare_data">
 <a class="viewcode-back" href="../../../api/graphnet.data.curated_datamodule.html#graphnet.data.curated_datamodule.CuratedDataset.prepare_data">[docs]</a>
@@ -606,7 +631,29 @@
         <span class="n">dataset_dir</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">join</span><span class="p">(</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_download_dir</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="vm">__class__</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_backend</span>
         <span class="p">)</span>
-        <span class="k">return</span> <span class="n">dataset_dir</span></div>
+        <span class="k">return</span> <span class="n">dataset_dir</span>
+
+    <span class="c1"># DEPRECATION: REMOVE AT 2.0 LAUNCH</span>
+    <span class="c1"># See https://github.com/graphnet-team/graphnet/issues/647</span>
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_graph_definition</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">DataRepresentation</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Return the graph definition."""</span>
+        <span class="c1"># needed for the call in _prepare_args</span>
+        <span class="c1"># call before Logger init</span>
+        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">"_logger"</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+                <span class="s2">"DeprecationWarning: `_graph_definition` will be deprecated in"</span>
+                <span class="s2">" GraphNeT 2.0. Please use `_data_representation` instead."</span>
+            <span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">Logger</span><span class="p">(</span><span class="n">log_folder</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span><span class="o">.</span><span class="n">warning_once</span><span class="p">(</span>
+                <span class="p">(</span>
+                    <span class="s2">"`graphnet.models.graphs` will be depricated soon. "</span>
+                    <span class="s2">"All functionality has been moved to "</span>
+                    <span class="s2">"`graphnet.models.data_representation`."</span>
+                <span class="p">)</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_data_representation</span>  <span class="c1"># type: ignore</span></div>
 
 
 
