@@ -110,6 +110,7 @@ class DataRepresentation(Model):
             self._output_feature_names = self._set_output_feature_names(
                 self._input_feature_names
             )
+        
         return self._output_feature_names
 
     def forward(  # type: ignore

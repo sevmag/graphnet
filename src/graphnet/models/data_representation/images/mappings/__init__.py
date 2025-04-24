@@ -8,4 +8,5 @@ regular sized image.
 from .pixel_mappings import (
     PixelMapping,
     IC86DNNMapping,
+    IC86DNNMapping_fast,
 )
