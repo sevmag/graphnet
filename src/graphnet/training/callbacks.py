@@ -7,21 +7,84 @@ import warnings
 
 import numpy as np
 from tqdm.std import Bar
+import torch
 
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import TQDMProgressBar, EarlyStopping
 from pytorch_lightning.utilities import rank_zero_only
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler
+from torch.optim.lr_scheduler import (
+    LRScheduler,
+    SequentialLR,
+    ReduceLROnPlateau,
+    LinearLR,
+)
 
 from graphnet.utilities.logging import Logger
+from bisect import bisect_right
 
 if TYPE_CHECKING:
     from graphnet.models import Model
     import pytorch_lightning as pl
 
 
-class PiecewiseLinearLR(_LRScheduler):
+class ReduceLROnPlateauWithWarmup(SequentialLR):
+    """ReduceLROnPlateau with warmup.
+
+    wrapper for `torch.optim.lr_scheduler.SequentialLR` to combine
+    `torch.optim.lr_scheduler.LinearLR` and
+    `torch.optim.lr_scheduler.ReduceLROnPlateau`. Needed for config files.
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        warmup_milestone: int,
+        warmup_kwargs: dict,
+        reducelronplateau_kwargs: dict,
+    ) -> None:
+        """Construct `ReduceLROnPlateauWithWarmup`.
+
+        Args:
+            optimizer: Wrapped optimizer.
+            warmup_milestone: Number of steps for warmup.
+            warmup_kwargs: Keyword arguments for `LinearLR`.
+            reducelronplateau_kwargs: Keyword arguments for
+                `ReduceLROnPlateau`.
+        """
+        assert warmup_milestone > 0, "Warmup milestone must be positive."
+        warmup_kwargs["total_iters"] = warmup_milestone - 1
+        super().__init__(
+            optimizer,
+            milestones=[warmup_milestone],
+            schedulers=[
+                LinearLR(optimizer, **warmup_kwargs),
+                ReduceLROnPlateau(optimizer, **reducelronplateau_kwargs),
+            ],
+        )
+
+    def step(self, metric: torch.tensor) -> None:  # type: ignore[override]
+        """Perform a step.
+
+        Args:
+            metric: Metric to monitor.
+                for ReduceLROnPlateau.
+        """
+        self.last_epoch += 1
+        idx = bisect_right(self._milestones, self.last_epoch)
+        scheduler = self._schedulers[idx]
+        if idx > 0:
+            if self._milestones[idx - 1] == self.last_epoch:
+                scheduler.step(metric, 0)
+            else:
+                scheduler.step(metric)
+        else:
+            scheduler.step()
+
+        self._last_lr = scheduler.get_last_lr()
+
+
+class PiecewiseLinearLR(LRScheduler):
     """Interpolate learning rate linearly between milestones."""
 
     def __init__(
