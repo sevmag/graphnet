@@ -226,14 +226,11 @@ class IC86DNNMapping_fast(PixelMapping):
             ascending=[True, True],
             inplace=True,
         )
-        print(df.head)
 
         self._tensor_mapping = torch.tensor(
             df.values,
             dtype=dtype,
         )
-
-        print(self._tensor_mapping)
 
     def _set_indeces(
         self,
@@ -277,19 +274,16 @@ class IC86DNNMapping_fast(PixelMapping):
         # Direct coordinate and feature extraction
         string_dom_number = x[:, [self._string_idx, self._dom_number_idx]]
         batch_row_features = x[:, self._cnn_features_idx]
-        print(string_dom_number)
-        print(string_dom_number.size())
 
-        print(self._tensor_mapping[:, [6,7]])
-        print(self._tensor_mapping[:, [6,7]])
         # Compute coordinate matches directly
         coord_matches = torch.all(
-            string_dom_number == self._tensor_mapping[:, [6,7]],
+            torch.eq(
+                string_dom_number.unsqueeze(1),
+                self._tensor_mapping[:, [6,7]].unsqueeze(0),
+            ),
             dim=-1,
         )
 
-        print(coord_matches)
-        print(coord_matches.size())
 
         # Find matching indices
         match_indices = coord_matches.nonzero(as_tuple=False)

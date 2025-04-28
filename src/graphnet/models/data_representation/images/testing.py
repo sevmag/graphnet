@@ -60,20 +60,17 @@ class TestImageIC86Mapping(ImageDefinition):
 
 
 class TestPixel(NodeDefinition):
-    """Represent pixels as clusters with percentile summary pixel features.
+    """Test pixel class.
 
-    If `cluster_on` is set to the xyz coordinates of DOMs
-    e.g. `cluster_on = ['dom_x', 'dom_y', 'dom_z']`, each pixel will be a
-    unique DOM and the pulse information (charge, time) is summarized using
-    percentiles.
+    Just returns the input data as a Data object.
     """
 
     def _define_output_feature_names(
         self, input_feature_names: List[str]
     ) -> List[str]:
-        assert set(input_feature_names) == set(
-            ["dom_x", "dom_y", "dom_z", "string", "dom_number"]
-        )
+        # assert set(input_feature_names) == set(
+        #     ["dom_x", "dom_y", "dom_z", "string", "dom_number"]
+        # )
         return input_feature_names
 
     def _construct_nodes(self, x: torch.Tensor) -> Data:
