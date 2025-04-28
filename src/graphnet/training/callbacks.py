@@ -74,10 +74,7 @@ class ReduceLROnPlateauWithWarmup(SequentialLR):
         idx = bisect_right(self._milestones, self.last_epoch)
         scheduler = self._schedulers[idx]
         if idx > 0:
-            if self._milestones[idx - 1] == self.last_epoch:
-                scheduler.step(metric, 0)
-            else:
-                scheduler.step(metric)
+            scheduler.step(metric)
         else:
             scheduler.step()
 
