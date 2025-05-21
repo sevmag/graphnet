@@ -54,7 +54,13 @@ from graphnet.training.labels import Direction
 
 #region ### Block for (modified) DeepIce auxiliaries ###
 
-def my_sub_sample(data, max_length, columns = [0, 1, 2], nb_nearest=8, hlc_pos=6):
+def my_sub_sample(
+    data, 
+    max_length, 
+    columns = [0, 1, 2], 
+    nb_nearest=8, 
+    hlc_pos=6
+):
     x = data.x
     btch = data.batch
     x = x.view(-1, 1) if x.dim() == 1 else x
