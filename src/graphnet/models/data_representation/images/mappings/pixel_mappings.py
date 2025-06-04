@@ -83,10 +83,13 @@ class IC86DNNMapping(PixelMapping):
             inplace=True,
         )
 
-        self._tensor_mapping = torch.tensor(
-            df.values,
-            dtype=dtype,
+        df.set_index(
+            ["string", "dom_number"],
+            inplace=True,
+            drop=False,
         )
+
+        self._mapping = df
 
     def _set_indeces(
         self,
@@ -130,50 +133,43 @@ class IC86DNNMapping(PixelMapping):
         string_dom_number = x[:, [self._string_idx, self._dom_number_idx]]
         batch_row_features = x[:, self._cnn_features_idx]
 
+        print(self._mapping)
         # Compute coordinate matches directly
-        coord_matches = torch.all(
-            torch.eq(
-                string_dom_number.unsqueeze(1),
-                self._tensor_mapping[:, [6, 7]].unsqueeze(0),
-            ),
-            dim=-1,
-        )
+        match_indices = self._mapping.loc[
+            zip(*string_dom_number.t().tolist())
+        ][["string", "dom_number", "mat_ax0", "mat_ax1", "mat_ax2"]].values
 
+        print(match_indices)
+        # raise NotImplementedError
         # Find matching indices
-        match_indices = coord_matches.nonzero(as_tuple=False)
-
-        assert match_indices.numel() != 0
 
         # Process matches efficiently
-        for match_row, geom_idx in match_indices:
-            # Retrieve geometric information directly from tensor
-            string_val = self._tensor_mapping[geom_idx, 6].item()
-            dom_number = self._tensor_mapping[geom_idx, 7].item()
-
+        for i, row in enumerate(match_indices):
+            print(row)
             # Select appropriate array and indexing
-            if string_val < 79:  # Main Array
+            if row[0] < 79:  # Main Array
                 main_arr[
                     :,
-                    int(self._tensor_mapping[geom_idx, 3]),
-                    int(self._tensor_mapping[geom_idx, 4]),
-                    int(self._tensor_mapping[geom_idx, 5]),
-                ] = batch_row_features[match_row]
+                    row[2],  # mat_ax0
+                    row[3],  # mat_ax1
+                    row[4],  # mat_ax2
+                ] = batch_row_features[i]
 
-            elif dom_number < 11:  # Upper DeepCore
+            elif row[1] < 11:  # Upper DeepCore
                 if self._include_upper_dc:
                     upper_dc_arr[
                         :,
-                        int(self._tensor_mapping[geom_idx, 3]),
-                        int(self._tensor_mapping[geom_idx, 4]),
-                    ] = batch_row_features[match_row]
+                        row[2],  # mat_ax0
+                        row[3],  # mat_ax1
+                    ] = batch_row_features[i]
 
             else:  # Lower DeepCore
                 if self._include_lower_dc:
                     lower_dc_arr[
                         :,
-                        int(self._tensor_mapping[geom_idx, 3]),
-                        int(self._tensor_mapping[geom_idx, 4]),
-                    ] = batch_row_features[match_row]
+                        row[2],  # mat_ax0
+                        row[3],  # mat_ax1
+                    ] = batch_row_features[i]
 
         # unqueeze to add batch dimension
         ret = [main_arr.unsqueeze(0)]
@@ -183,7 +179,6 @@ class IC86DNNMapping(PixelMapping):
             ret.append(lower_dc_arr.unsqueeze(0))
 
         data.x = ret
-
         return data
 
     def _set_image_feature_names(self, input_feature_names: List[str]) -> None:
