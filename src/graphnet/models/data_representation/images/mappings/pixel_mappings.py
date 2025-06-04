@@ -137,7 +137,11 @@ class IC86DNNMapping(PixelMapping):
         # Compute coordinate matches directly
         match_indices = self._mapping.loc[
             zip(*string_dom_number.t().tolist())
-        ][["string", "dom_number", "mat_ax0", "mat_ax1", "mat_ax2"]].values
+        ][
+            ["string", "dom_number", "mat_ax0", "mat_ax1", "mat_ax2"]
+        ].values.astype(
+            int
+        )
 
         print(match_indices)
         # raise NotImplementedError
