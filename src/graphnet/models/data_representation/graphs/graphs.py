@@ -58,9 +58,10 @@ class KNNGraph(GraphDefinition):
         edge_definition = (
             KNNDistanceEdges if distance_as_edge_feature else KNNEdges
         )
+        self._node_definition = node_definition or NodesAsPulses()
         super().__init__(
             detector=detector,
-            node_definition=node_definition or NodesAsPulses(),
+            node_definition=self._node_definition,
             edge_definition=edge_definition(
                 nb_nearest_neighbours=nb_nearest_neighbours,
                 columns=columns,
@@ -71,6 +72,15 @@ class KNNGraph(GraphDefinition):
             seed=seed,
             **kwargs,
         )
+
+        if hasattr(node_definition, "_output_feature_names"):
+            knn_distance_cols = [
+                self._node_definition._output_feature_names[i] for i in columns
+            ]
+            self.info(
+                f"Using columns {knn_distance_cols} "
+                "for KNN distance calculation."
+            )
 
 
 class EdgelessGraph(GraphDefinition):
