@@ -47,12 +47,14 @@ class I3GenericExtractor(I3Extractor):
         exclude_keys: Optional[Union[str, List[str]]] = None,
         extractor_name: str = GENERIC_EXTRACTOR_NAME,
         exclude: list = [None],
+        verbose: bool = True,
     ):
         """Construct I3GenericExtractor.
 
         Args:
             keys: List of keys in `I3Frame` to be parsed. Defaults to all keys.
             exclude_keys: List of keys in `I3Frame` to exclude while parsing.
+            verbose: If True, print debug and warning messages.
 
         Raises:
             ValueError: If both `keys` and `exclude_keys` are set.
@@ -72,6 +74,7 @@ class I3GenericExtractor(I3Extractor):
         # Reference to frame currently being processed
         self._keys: Optional[List[str]] = keys
         self._exclude_keys: Optional[List[str]] = exclude_keys
+        self._verbose: bool = verbose
 
         # Base class constructor
         super().__init__(extractor_name, exclude=exclude)
@@ -115,9 +118,10 @@ class I3GenericExtractor(I3Extractor):
             try:
                 obj = frame[key]
             except RuntimeError:
-                self.debug(f"Key {key} in frame not supported. Skipping.")
+                if self._verbose:
+                    self.debug(f"Key {key} in frame not supported. Skipping.")
             except KeyError:
-                if self._keys is not None:
+                if (self._keys is not None) and (self._verbose):
                     self.warning(f"Key {key} not in frame. Skipping")
                 continue
 
