@@ -58,10 +58,10 @@ class KNNGraph(GraphDefinition):
         edge_definition = (
             KNNDistanceEdges if distance_as_edge_feature else KNNEdges
         )
-        self._node_definition = node_definition or NodesAsPulses()
+
         super().__init__(
             detector=detector,
-            node_definition=self._node_definition,
+            node_definition=node_definition,
             edge_definition=edge_definition(
                 nb_nearest_neighbours=nb_nearest_neighbours,
                 columns=columns,
