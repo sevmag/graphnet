@@ -32,6 +32,7 @@ class I3Calorimetry(I3Extractor):
         mmctracklist: str = "MMCTrackList",
         extractor_name: str = "I3Calorimetry",
         daughters: bool = False,
+        highest_energy_primary: bool = False,
         **kwargs: Any,
     ) -> None:
         """Create a ConvexHull object from the GCD file.
@@ -41,14 +42,33 @@ class I3Calorimetry(I3Extractor):
         mctree: Name of the I3MCTree in the frame.
         mmctracklist: Name of the MMCTrackList in the frame.
         extractor_name: Name of the extractor.
-        daughters: If True, only consider particles that are
-            daughters of the primary.
+        daughters: If True, only calculate energies for particles
+            that are daughters of the primary.
+        highest_energy_primary: If True, takes into account only the
+            primary with the highest energy.
+            NOTE: Only makes a difference if daughters is False
+                and the event is not a Corsika event.
+
+        Variable explanation:
+        - e_entrance_track: Total energy of tracks entering the hull.
+        - e_deposited_track: Total energy deposited by tracks in the hull.
+        - e_cascade: Total energy of cascade particles in the hull.
+        - e_visible: Total energy of particles entering the hull.
+            NOTE: if daughters is True, this is the total visible energy
+            of daughter particles of the primary particles. If this is 0
+            that means that all the light in the detector comes from
+            particles that are daughters of coincident primaries.
+        - fraction_primary: Fraction of `e_visible` compared to
+            the primary energy.
+        - fraction_cascade: Fraction of the total energy that is
+            deposited by cascade particles compared to the total energy.
         """
         # Member variable(s)
         self.hull = hull
         self.mctree = mctree
         self.mmctracklist = mmctracklist
         self.daughters = daughters
+        self.highest_energy_primary = highest_energy_primary
         # Base class constructor
         super().__init__(extractor_name=extractor_name, **kwargs)
 
@@ -67,36 +87,79 @@ class I3Calorimetry(I3Extractor):
                 [
                     p.energy
                     for p in self.check_primary_energy(
-                        frame, self.get_primaries(frame, self.daughters)
+                        frame,
+                        self.get_primaries(
+                            frame,
+                            self.daughters,
+                            self.highest_energy_primary,
+                        ),
                     )
                 ]
             )
             e_total = e_entrance_track + e_deposited_cascade
 
-            if self.daughters:
-                assert e_total <= (
-                    primary_energy * (1 + 1e-6)
-                ), "Total energy on entrance is greater than primary energy\
-                    \nTotal energy: {}\
-                    \nPrimary energy: {}\
-                    \nTrack energy: {}\
-                    \nCascade energy: {}\
-                    {}".format(
-                    e_total,
-                    primary_energy,
-                    e_entrance_track,
-                    e_deposited_cascade,
-                    frame["I3EventHeader"],
+            # In case all particles are considered and
+            # there is no energy deposited in the hull,
+            # we warn the user.
+            if all(
+                (
+                    not self.daughters,
+                    not self.highest_energy_primary,
+                    e_total == 0,
                 )
+            ):
+                self.warning(
+                    "No energy deposited in the hull, \
+                    Think about in creasing the padding. \
+                    \nCurrent padding: {}\
+                    \nTotal energy: {}\
+                    \nTrack energy: {}\
+                    \nCascade energy: {} \
+                    \nEvent header: {}\
+                    ".format(
+                        self.hull.padding,
+                        e_total,
+                        e_entrance_track,
+                        e_deposited_cascade,
+                        frame["I3EventHeader"],
+                    )
+                )
+
+            # total energy should always be less than the primary energy
+            assert e_total <= (
+                primary_energy * (1 + 1e-6)
+            ), "Total energy on entrance is greater than primary energy\
+                \nTotal energy: {}\
+                \nPrimary energy: {}\
+                \nTrack energy: {}\
+                \nCascade energy: {}\
+                {}".format(
+                e_total,
+                primary_energy,
+                e_entrance_track,
+                e_deposited_cascade,
+                frame["I3EventHeader"],
+            )
 
             cascade_fraction = None
             if e_total > 0:
                 cascade_fraction = e_deposited_cascade / e_total
 
-            if primary_energy > 0:
-                fraction_primary = e_total / primary_energy
-            else:
-                fraction_primary = None
+            assert (
+                primary_energy > 0
+            ), "Primary energy is 0, this should not happen.\
+                \nTotal energy: {}\
+                \nTrack energy: {}\
+                \nCascade energy: {}\
+                {}".format(
+                e_total,
+                e_entrance_track,
+                e_deposited_cascade,
+                frame["I3EventHeader"],
+            )
+
+            fraction_primary = e_total / primary_energy
+
             output.update(
                 {
                     "e_entrance_track_"
@@ -125,7 +188,11 @@ class I3Calorimetry(I3Extractor):
         """Get the total energy of track particles on entrance."""
         e_entrance = 0
         e_deposited = 0
-        primaries = self.get_primaries(frame, self.daughters)
+        primaries = self.get_primaries(
+            frame,
+            self.daughters,
+            self.highest_energy_primary,
+        )
         primaries = self.check_primary_energy(frame, primaries)
 
         MMCTrackList = frame[self.mmctracklist]
@@ -169,7 +236,11 @@ class I3Calorimetry(I3Extractor):
         """Get the total energy of cascade particles on entrance."""
         e_deposited = 0
 
-        particles = self.get_primaries(frame, self.daughters)
+        particles = self.get_primaries(
+            frame,
+            self.daughters,
+            self.highest_energy_primary,
+        )
 
         particles = np.array([p for p in particles if (not p.is_track)])
 
@@ -236,7 +307,11 @@ class I3Calorimetry(I3Extractor):
                     continue
                 if length == np.nan:
                     length = 0
-                if daughter.is_cascade and daughter.shape != "Dark":
+                if (
+                    daughter.is_cascade
+                    and daughter.shape
+                    != dataclasses.I3Particle.ParticleShape.Dark
+                ):
                     e_deposited += daughter.energy
                 else:
                     daughters = np.concatenate(
