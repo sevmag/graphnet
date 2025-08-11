@@ -78,9 +78,9 @@ def test_pixel_mappings() -> None:
         len(pixel_mapping.shape) == 3
     ), f"Expected shape to be 3 got {len(pixel_mapping.shape)}"
     assert pixel_mapping.shape == [
-        (n_features, 10, 10, 60),
-        (n_features, 1, 8, 10),
-        (n_features, 1, 8, 50),
+        [n_features, 10, 10, 60],
+        [n_features, 1, 8, 10],
+        [n_features, 1, 8, 50],
     ], (
         f"Expected shape to be [({n_features},10,10,60), "
         f"({n_features},1,8,10), ({n_features},1,8,50)] got "
