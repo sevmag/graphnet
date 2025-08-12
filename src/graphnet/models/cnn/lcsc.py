@@ -6,7 +6,7 @@ All credits go to Alexander Harnisch (https://github.com/AlexHarn)
 from .cnn import CNN
 import torch
 from torch_geometric.data import Data
-from typing import List, Union, Tuple
+from typing import List, Union, Tuple, Type, Optional
 
 
 class LCSC(CNN):
@@ -66,18 +66,18 @@ class LCSC(CNN):
         """Initialize the Lightning CNN signal classifier (LCSC).
 
         Args:
-            num_input_features (int): Number of input features.
-            out_put_dim (int): Number of output dimensions of final MLP.
+            num_input_features: Number of input features.
+            out_put_dim: Number of output dimensions of final MLP.
                 Defaults to 2.
-            input_norm (bool): Whether to apply normalization to the input.
+            input_norm: Whether to apply normalization to the input.
                 Defaults to True.
-            num_conv_layers (int): Number of convolutional layers.
+            num_conv_layers: Number of convolutional layers.
                 Defaults to 8.
-            conv_filters (List[int]): List of number of convolutional
+            conv_filters: List of number of convolutional
                 filters to use in hidden layers.
                 Defaults to [50, 50, 50, 50, 50, 50, 50, 50, 10].
                 NOTE needs to have the length of `num_conv_layers`.
-            kernel_size (int, List[int], or List[List[int]]):
+            kernel_size:
                 Size of the convolutional kernels.
                 Options are:
                     int: single integer for all dimensions
@@ -91,7 +91,7 @@ class LCSC(CNN):
                         for the corresponding layer as kernel size.
                 NOTE: If a list if passed it needs to have the length
                      of `num_conv_layers`.
-            padding (str, int, or List[int]]): Padding for the
+            padding: Padding for the
                 convolutional layers.
                 Options are:
                     'Same' for same convolutional padding,
@@ -103,7 +103,7 @@ class LCSC(CNN):
                         NOTE: If a list is passed it needs to have the length
                             of `num_conv_layers`.
                 Defaults to 'Same'.
-            pooling_type (List[None,str]): List of pooling types
+            pooling_type: List of pooling types
                 for layers.
                 Options are
                     None  : No pooling is used,
@@ -117,7 +117,7 @@ class LCSC(CNN):
                     ].
                     NOTE: the length of the list must be equal to
                         `num_conv_layers`.
-            pooling_kernel_size (List[Union[int,List[int]]]):
+            pooling_kernel_size:
                 List of pooling kernel sizes for each layer.
                 If an integer is provided, it will be used for all layers.
                 In case of a list the options for its elements are:
@@ -133,7 +133,7 @@ class LCSC(CNN):
                     None, [2, 2, 2],
                     None, [2, 2, 2]
                 ].
-            pooling_stride (int or List[Union[None,int]]):
+            pooling_stride:
                 List of pooling strides for each layer.
                 If an integer is provided, it will be used for all layers.
                 In case of a list the options for its elements are:
@@ -149,240 +149,61 @@ class LCSC(CNN):
                     None, [2, 2, 2],
                     None, [2, 2, 2]
                 ].
-            num_fc_neurons (int): Number of neurons in the
+            num_fc_neurons: Number of neurons in the
                 fully connected layers.
                 Defaults to 50.
-            norm_list (bool or List[bool]): Whether to apply normalization
+            norm_list: Whether to apply normalization
                 for each convolutional layer.
                 If a boolean is provided, it will be used for all layers.
                 Defaults to True.
                 NOTE: If a list is passed it needs to have the length
                     of `num_conv_layers`.
-            norm_type (str): Type of normalization to use.
+            norm_type: Type of normalization to use.
                 Options are 'Batch' or 'Instance'.
                 Defaults to 'Batch'.
-            image_size (Tuple[int, int, int]): Size of the input image
+            image_size: Size of the input image
                 in the format (height, width, depth).
                 NOTE: Only needs to be changed if the input image is not
                     the standard IceCube 86 image size.
         """
         super().__init__(nb_inputs=num_input_features, nb_outputs=out_put_dim)
 
-        # Check input parameters
-        if isinstance(conv_filters, int):
-            conv_filters = [conv_filters for _ in range(num_conv_layers)]
-        else:
-            if not isinstance(conv_filters, list):
-                raise TypeError(
-                    (
-                        f"`conv_filters` must be a "
-                        f"list or an integer, not {type(conv_filters)}!"
-                    )
-                )
-            if len(conv_filters) != num_conv_layers:
-                raise ValueError(
-                    f"`conv_filters` must have {num_conv_layers} "
-                    f"elements, not {len(conv_filters)}!"
-                )
-
-        if isinstance(kernel_size, int):
-            kernel_size = [  # type: ignore[assignment]
-                [kernel_size, kernel_size, kernel_size]
-                for _ in range(num_conv_layers)
-            ]
-        else:
-            if not isinstance(kernel_size, list):
-                raise TypeError(
-                    (
-                        "`kernel_size` must be a list or an "
-                        f"integer, not {type(kernel_size)}!"
-                    )
-                )
-            if len(kernel_size) != num_conv_layers:
-                raise ValueError(
-                    (
-                        f"`kernel_size` must have {num_conv_layers} "
-                        f"elements, not {len(kernel_size)}!"
-                    )
-                )
-
-        if isinstance(padding, int):
-            padding = [padding for _ in range(num_conv_layers)]
-        elif isinstance(padding, str):
-            if padding.lower() == "same":
-                padding = ["same" for i in range(num_conv_layers)]
-            else:
-                raise ValueError(
-                    (
-                        "`padding` must be 'Same' or an integer, "
-                        f"not {padding}!"
-                    )
-                )
-        else:
-            if not isinstance(padding, list):
-                raise TypeError(
-                    (
-                        f"`padding` must be a list or "
-                        f"an integer, not {type(padding)}!"
-                    )
-                )
-            if len(padding) != num_conv_layers:
-                raise ValueError(
-                    f"`padding` must have {num_conv_layers} "
-                    f"elements, not {len(padding)}!"
-                )
-
-        if isinstance(pooling_kernel_size, int):
-            pooling_kernel_size = [
-                pooling_kernel_size for i in range(num_conv_layers)
-            ]
-        else:
-            if not isinstance(pooling_kernel_size, list):
-                raise TypeError(
-                    (
-                        "`pooling_kernel_size` must be a list or "
-                        f"an integer, not {type(pooling_kernel_size)}!"
-                    )
-                )
-            if len(pooling_kernel_size) != num_conv_layers:
-                raise ValueError(
-                    (
-                        f"`pooling_kernel_size` must have "
-                        f"{num_conv_layers} elements, not "
-                        f"{len(pooling_kernel_size)}!"
-                    )
-                )
-
-        if isinstance(pooling_stride, int):
-            pooling_stride = [pooling_stride for i in range(num_conv_layers)]
-        else:
-            if not isinstance(pooling_stride, list):
-                raise TypeError(
-                    (
-                        "`pooling_stride` must be a list or an integer, "
-                        f"not {type(pooling_stride)}!"
-                    )
-                )
-            if len(pooling_stride) != num_conv_layers:
-                raise ValueError(
-                    (
-                        f"`pooling_stride` must have {num_conv_layers} "
-                        f"elements, not {len(pooling_stride)}!"
-                    )
-                )
-
-        if isinstance(norm_list, bool):
-            self._norm_list = [norm_list for i in range(num_conv_layers)]
-        else:
-            if not isinstance(norm_list, list):
-                raise TypeError(
-                    (
-                        "`norm_list` must be a list or a boolean, "
-                        f"not {type(norm_list)}!"
-                    )
-                )
-            if len(norm_list) != num_conv_layers:
-                raise ValueError(
-                    (
-                        f"`norm_list` must have {num_conv_layers} "
-                        f"elements, not {len(norm_list)}!"
-                    )
-                )
-            self._norm_list = norm_list
-
-        if norm_type.lower() == "instance":
-            norm_class = torch.nn.InstanceNorm3d
-            if input_norm:
-                self.input_normal = torch.nn.InstanceNorm3d(num_input_features)
-        elif norm_type.lower() == "batch":
-            norm_class = torch.nn.BatchNorm3d
-            if input_norm:
-                # No momentum or learnable parameters for input normalization,
-                # just use the average
-                self.input_normal = torch.nn.BatchNorm3d(
-                    num_input_features, momentum=None, affine=False
-                )
-        else:
-            raise ValueError(
-                (
-                    "`norm_type` has to be 'instance' or "
-                    f"'batch, not '{norm_type}'!"
-                )
+        (self.conv_filters, self.kernel_size, self.padding) = (
+            self._parse_conv_arguments(
+                kernel_size,
+                num_conv_layers,
+                padding,
+                conv_filters,
             )
-
-        # Initialize layers
-        self.conv = torch.nn.ModuleList()
-        self.pool = torch.nn.ModuleList()
-        self.input_norm = input_norm
-
-        self.normal = torch.nn.ModuleList()
-        dimensions: List[int] = [
-            num_input_features,
-            *image_size,
-        ]  # (nb_features per pixel, height, width, depth)
-        for i in range(num_conv_layers):
-            self.conv.append(
-                torch.nn.Conv3d(
-                    dimensions[0],
-                    conv_filters[i],
-                    kernel_size=kernel_size[i],
-                    padding=padding[i],
-                )
-            )
-            dimensions = self._calc_output_dimension(
-                dimensions,
-                conv_filters[i],
-                kernel_size[i],
-                padding[i],
-            )
-            if pooling_type[i] is None or pooling_type[i] == "None":
-                self.pool.append(None)
-            elif pooling_type[i] == "Avg":
-                self.pool.append(
-                    torch.nn.AvgPool3d(
-                        kernel_size=pooling_kernel_size[i],
-                        stride=pooling_stride[i],
-                    )
-                )
-                dimensions = self._calc_output_dimension(
-                    dimensions,
-                    out_channels=dimensions[
-                        0
-                    ],  # same out channels as input channels for pooling
-                    kernel_size=pooling_kernel_size[i],
-                    stride=pooling_stride[i],
-                )
-            elif pooling_type[i] == "Max":
-                self.pool.append(
-                    torch.nn.MaxPool3d(
-                        kernel_size=pooling_kernel_size[i],
-                        stride=pooling_stride[i],
-                    )
-                )
-                dimensions = self._calc_output_dimension(
-                    dimensions,
-                    out_channels=dimensions[
-                        0
-                    ],  # same out channels as input channels for pooling
-                    kernel_size=pooling_kernel_size[i],
-                    stride=pooling_stride[i],
-                )
-            else:
-                raise ValueError(
-                    "Pooling type must be 'None', 'Avg' or 'Max'!"
-                )
-            if self._norm_list[i]:
-                self.normal.append(norm_class(dimensions[0]))
-            else:
-                self.normal.append(None)
-
-        latent_dim = (
-            dimensions[0] * dimensions[1] * dimensions[2] * dimensions[3]
         )
 
-        self.flatten = torch.nn.Flatten()
-        self.fc1 = torch.nn.Linear(latent_dim, num_fc_neurons)
-        self.fc2 = torch.nn.Linear(num_fc_neurons, out_put_dim)
+        (self.pooling_kernel_size, self.pooling_type, self.pooling_stride) = (
+            self._parse_pooling_arguments(
+                pooling_type,
+                pooling_kernel_size,
+                pooling_stride,
+                num_conv_layers,
+            )
+        )
+
+        (self.norm_list, self.norm_class, self.input_normal) = (
+            self._parse_norm_arguments(
+                norm_list,
+                norm_type,
+                num_conv_layers,
+                input_norm,
+                num_input_features,
+            )
+        )
+
+        self.num_conv_layers = num_conv_layers
+        self.num_input_features = num_input_features
+        self.image_size = image_size
+        self.num_fc_neurons = num_fc_neurons
+        self.out_put_dim = out_put_dim
+        self.input_norm = input_norm
+
+        self._init_cnn_layers()
 
     def _calc_output_dimension(
         self,
@@ -445,11 +266,307 @@ class LCSC(CNN):
 
         return dimensions
 
+    @staticmethod
+    def _parse_conv_arguments(
+        kernel_size: Union[int, List[Union[int, List[int]]]],
+        num_conv_layers: int,
+        padding: Union[str, int, List[Union[str, int]]],
+        conv_filters: List[int],
+    ) -> Tuple[List[int], List[Union[int, List[int]]], List[Union[str, int]]]:
+        """Parse convolution layer arguments."""
+        # Check input parameters
+        ret_conv_filters: List[int]
+        ret_kernel_size: List[Union[int, List[int]]]
+        ret_padding: List[Union[str, int]]
+        if isinstance(conv_filters, int):
+            ret_conv_filters = [conv_filters for _ in range(num_conv_layers)]
+        else:
+            if not isinstance(conv_filters, list):
+                raise TypeError(
+                    (
+                        f"`conv_filters` must be a "
+                        f"list or an integer, not {type(conv_filters)}!"
+                    )
+                )
+            if len(conv_filters) != num_conv_layers:
+                raise ValueError(
+                    f"`conv_filters` must have {num_conv_layers} "
+                    f"elements, not {len(conv_filters)}!"
+                )
+            ret_conv_filters = conv_filters
+
+        if isinstance(kernel_size, int):
+            ret_kernel_size = [
+                [kernel_size, kernel_size, kernel_size]
+                for _ in range(num_conv_layers)
+            ]
+        else:
+            if not isinstance(kernel_size, list):
+                raise TypeError(
+                    (
+                        "`kernel_size` must be a list or an "
+                        f"integer, not {type(kernel_size)}!"
+                    )
+                )
+            if len(kernel_size) != num_conv_layers:
+                raise ValueError(
+                    (
+                        f"`kernel_size` must have {num_conv_layers} "
+                        f"elements, not {len(kernel_size)}!"
+                    )
+                )
+            if not all(isinstance(k, (int, list)) for k in kernel_size):
+                raise TypeError(
+                    (
+                        "`kernel_size` must be a list of integers or "
+                        f"an integer, not {[type(k) for k in kernel_size]}!"
+                    )
+                )
+            ret_kernel_size = kernel_size
+
+        if isinstance(padding, int):
+            ret_padding = [padding for _ in range(num_conv_layers)]
+        elif isinstance(padding, str):
+            if padding.lower() == "same":
+                ret_padding = ["same" for i in range(num_conv_layers)]
+            else:
+                raise ValueError(
+                    (
+                        "`padding` must be 'Same' or an integer, "
+                        f"not {padding}!"
+                    )
+                )
+        else:
+            if not isinstance(padding, list):
+                raise TypeError(
+                    (
+                        f"`padding` must be a list or "
+                        f"an integer, not {type(padding)}!"
+                    )
+                )
+            if len(padding) != num_conv_layers:
+                raise ValueError(
+                    f"`padding` must have {num_conv_layers} "
+                    f"elements, not {len(padding)}!"
+                )
+            ret_padding = padding
+
+        return ret_conv_filters, ret_kernel_size, ret_padding
+
+    @staticmethod
+    def _parse_pooling_arguments(
+        pooling_type: List[Union[None, str]],
+        pooling_kernel_size: List[Union[None, int, List[int]]],
+        pooling_stride: Union[int, List[Union[None, int, List[int]]]],
+        num_conv_layers: int,
+    ) -> Tuple[
+        List[Union[None, int, List[int]]],
+        List[Union[None, str]],
+        List[Union[None, int, List[int]]],
+    ]:
+        """Parse pooling layer arguments."""
+        if isinstance(pooling_kernel_size, int):
+            pooling_kernel_size = [
+                pooling_kernel_size for _ in range(num_conv_layers)
+            ]
+        else:
+            if not isinstance(pooling_kernel_size, list):
+                raise TypeError(
+                    (
+                        "`pooling_kernel_size` must be a list or "
+                        f"an integer, not {type(pooling_kernel_size)}!"
+                    )
+                )
+            if len(pooling_kernel_size) != num_conv_layers:
+                raise ValueError(
+                    (
+                        f"`pooling_kernel_size` must have "
+                        f"{num_conv_layers} elements, not "
+                        f"{len(pooling_kernel_size)}!"
+                    )
+                )
+
+        if isinstance(pooling_stride, int):
+            pooling_stride = [pooling_stride for i in range(num_conv_layers)]
+        else:
+            if not isinstance(pooling_stride, list):
+                raise TypeError(
+                    (
+                        "`pooling_stride` must be a list or an integer, "
+                        f"not {type(pooling_stride)}!"
+                    )
+                )
+            if len(pooling_stride) != num_conv_layers:
+                raise ValueError(
+                    (
+                        f"`pooling_stride` must have {num_conv_layers} "
+                        f"elements, not {len(pooling_stride)}!"
+                    )
+                )
+
+        if pooling_type is not None:
+            if not isinstance(pooling_type, list):
+                raise TypeError(
+                    (
+                        "`pooling_type` must be a list or None, "
+                        f"not {type(pooling_type)}!"
+                    )
+                )
+            if not len(pooling_type) == num_conv_layers:
+                raise ValueError(
+                    (
+                        f"`pooling_type` must have {num_conv_layers} "
+                        f"elements, not {len(pooling_type)}!"
+                    )
+                )
+            if not all(t in ["Max", "Avg", None] for t in pooling_type):
+                raise ValueError(
+                    (
+                        f"`pooling_type` must be one of ['Max', 'Avg', None], "
+                        f"got: {pooling_type}!"
+                    )
+                )
+
+        return pooling_kernel_size, pooling_type, pooling_stride
+
+    @staticmethod
+    def _parse_norm_arguments(
+        norm_list: bool,
+        norm_type: str,
+        num_conv_layers: int,
+        input_norm: bool,
+        num_input_features: int,
+    ) -> Tuple[List[bool], Type[torch.nn.Module], Optional[torch.nn.Module]]:
+        """Parse normalization layer arguments."""
+        ret_norm_list: List[bool]
+        ret_norm_class: Type[torch.nn.Module]
+        ret_input_normal: Optional[torch.nn.Module]
+
+        if isinstance(norm_list, bool):
+            ret_norm_list = [norm_list for _ in range(num_conv_layers)]
+        else:
+            if not isinstance(norm_list, list):
+                raise TypeError(
+                    (
+                        "`norm_list` must be a list or a boolean, "
+                        f"not {type(norm_list)}!"
+                    )
+                )
+
+            if len(norm_list) != num_conv_layers:
+                raise ValueError(
+                    (
+                        f"`norm_list` must have {num_conv_layers} "
+                        f"elements, not {len(norm_list)}!"
+                    )
+                )
+            ret_norm_list = norm_list
+
+        if norm_type.lower() == "instance":
+            ret_norm_class = torch.nn.InstanceNorm3d
+            if input_norm:
+                ret_input_normal = torch.nn.InstanceNorm3d(num_input_features)
+            else:
+                ret_input_normal = None
+        elif norm_type.lower() == "batch":
+            ret_norm_class = torch.nn.BatchNorm3d
+            if input_norm:
+                # No momentum or learnable parameters for input normalization,
+                # just use the average
+                ret_input_normal = torch.nn.BatchNorm3d(
+                    num_input_features, momentum=None, affine=False
+                )
+            else:
+                ret_input_normal = None
+        else:
+            raise ValueError(
+                (
+                    "`norm_type` has to be 'instance' or "
+                    f"'batch, not '{norm_type}'!"
+                )
+            )
+        return ret_norm_list, ret_norm_class, ret_input_normal
+
+    def _init_cnn_layers(self) -> None:
+        """Initialize all layers."""
+        # Initialize layers
+        self.conv = torch.nn.ModuleList()
+        self.pool = torch.nn.ModuleList()
+        self.normal = torch.nn.ModuleList()
+
+        dimensions: List[int] = [
+            self.num_input_features,
+            *self.image_size,
+        ]  # (nb_features per pixel, height, width, depth)
+        for i in range(self.num_conv_layers):
+            self.conv.append(
+                torch.nn.Conv3d(
+                    dimensions[0],
+                    self.conv_filters[i],
+                    kernel_size=self.kernel_size[i],
+                    padding=self.padding[i],
+                )
+            )
+            dimensions = self._calc_output_dimension(
+                dimensions,
+                self.conv_filters[i],
+                self.kernel_size[i],
+                self.padding[i],
+            )
+            if self.pooling_type[i] is None or self.pooling_type[i] == "None":
+                self.pool.append(None)
+            elif self.pooling_type[i] == "Avg":
+                self.pool.append(
+                    torch.nn.AvgPool3d(
+                        kernel_size=self.pooling_kernel_size[i],
+                        stride=self.pooling_stride[i],
+                    )
+                )
+                dimensions = self._calc_output_dimension(
+                    dimensions,
+                    out_channels=dimensions[
+                        0
+                    ],  # same out channels as input channels for pooling
+                    kernel_size=self.pooling_kernel_size[i],
+                    stride=self.pooling_stride[i],
+                )
+            elif self.pooling_type[i] == "Max":
+                self.pool.append(
+                    torch.nn.MaxPool3d(
+                        kernel_size=self.pooling_kernel_size[i],
+                        stride=self.pooling_stride[i],
+                    )
+                )
+                dimensions = self._calc_output_dimension(
+                    dimensions,
+                    out_channels=dimensions[
+                        0
+                    ],  # same out channels as input channels for pooling
+                    kernel_size=self.pooling_kernel_size[i],
+                    stride=self.pooling_stride[i],
+                )
+            else:
+                raise ValueError(
+                    "Pooling type must be 'None', 'Avg' or 'Max'!"
+                )
+            if self.norm_list[i]:
+                self.normal.append(self.norm_class(dimensions[0]))
+            else:
+                self.normal.append(None)
+
+        latent_dim = (
+            dimensions[0] * dimensions[1] * dimensions[2] * dimensions[3]
+        )
+
+        self.flatten = torch.nn.Flatten()
+        self.fc1 = torch.nn.Linear(latent_dim, self.num_fc_neurons)
+        self.fc2 = torch.nn.Linear(self.num_fc_neurons, self.out_put_dim)
+
     def forward(self, data: Data) -> torch.Tensor:
         """Forward pass of the LCSC."""
         assert len(data.x) == 1, "Only Main Array image is supported for LCSC"
         x = data.x[0]
-        if self.input_norm:
+        if self.input_normal:
             x = self.input_normal(x)
         for i in range(len(self.conv)):
             x = self.conv[i](x)
