@@ -83,7 +83,7 @@ class IC86PixelMapping(PixelMapping):
         Args:
             dtype: data type used for node features. e.g. ´torch.float´
             string_label: Name of the feature corresponding
-                to the DOM string number. Values Integers betweem 1 - 86
+                to the DOM string number. Values Integers between 1 - 86
             dom_number_label: Name of the feature corresponding
                 to the DOM number (1 - 60). Values Integers between 1 - 60
                 where 1 is the dom with the highest z coordinate.
