@@ -48,13 +48,20 @@ class I3GenericExtractor(I3Extractor):
         extractor_name: str = GENERIC_EXTRACTOR_NAME,
         exclude: list = [None],
         verbose: bool = True,
+        skip_empty_keys: bool = True,
     ):
         """Construct I3GenericExtractor.
 
         Args:
             keys: List of keys in `I3Frame` to be parsed. Defaults to all keys.
             exclude_keys: List of keys in `I3Frame` to exclude while parsing.
-            verbose: If True, print debug and warning messages.
+            skip_empty_keys: If True, skip keys that are not found in the
+            frame.
+                NOTE: Sometimes you want to use keys that are not present
+                in every frame. In this scenario you want to set
+                `skip_empty_keys` to False. Setting it to True could result
+                in the key not appearing in a single whole file and therefore
+                merging of database files later could lead to errors.
 
         Raises:
             ValueError: If both `keys` and `exclude_keys` are set.
@@ -75,6 +82,7 @@ class I3GenericExtractor(I3Extractor):
         self._keys: Optional[List[str]] = keys
         self._exclude_keys: Optional[List[str]] = exclude_keys
         self._verbose: bool = verbose
+        self._skip_empty_keys: bool = skip_empty_keys
 
         # Base class constructor
         super().__init__(extractor_name, exclude=exclude)
@@ -111,7 +119,7 @@ class I3GenericExtractor(I3Extractor):
             Dictionary containing each parsed key in `frame`, and the
                 corresponding, extracted data in pure-python format.
         """
-        results = {}
+        results: Dict[str, Any] = {}
         for key in self._get_keys(frame):
 
             # Extract object from frame
@@ -121,7 +129,9 @@ class I3GenericExtractor(I3Extractor):
                 if self._verbose:
                     self.debug(f"Key {key} in frame not supported. Skipping.")
             except KeyError:
-                if (self._keys is not None) and (self._verbose):
+                if not self._skip_empty_keys:
+                    results[key] = None
+                elif (self._keys is not None) and (self._verbose):
                     self.warning(f"Key {key} not in frame. Skipping")
                 continue
 
@@ -185,6 +195,9 @@ class I3GenericExtractor(I3Extractor):
 
         # Serialise list of iterables to JSON
         results = {key: serialise(value) for key, value in results.items()}
+
+        # if not self._skip_empty_keys:
+        #     results.setdefault(key, None)
 
         return results
 
