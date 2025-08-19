@@ -32,6 +32,7 @@ class I3Calorimetry(I3Extractor):
         extractor_name: str = "I3Calorimetry",
         daughters: bool = False,
         highest_energy_primary: bool = False,
+        e_tolerance: float = 2,
         **kwargs: Any,
     ) -> None:
         """Create a ConvexHull object from the GCD file.
@@ -47,6 +48,13 @@ class I3Calorimetry(I3Extractor):
             primary with the highest energy.
             NOTE: Only makes a difference if daughters is False
                 and the event is not a Corsika event.
+        e_tolerance: The amount of energy in GeV that the calorimetry energies
+            are allowed to be bigger than the primary energy.
+            This is necessary sometimes, since the MC Tree can have very
+            small inconsistencies in energy variables, i.e. the daughters
+            having slightly higher energy than the parents etc.
+            NOTE: This is a hacky solution to cope with these situations and
+                one should be very careful setting this value higher.
 
         Variable explanation:
         - e_entrance_track: Total energy of tracks entering the hull.
@@ -68,6 +76,7 @@ class I3Calorimetry(I3Extractor):
         self.mmctracklist = mmctracklist
         self.daughters = daughters
         self.highest_energy_primary = highest_energy_primary
+        self.e_tolerance = e_tolerance
         # Base class constructor
         super().__init__(extractor_name=extractor_name, **kwargs)
 
@@ -128,8 +137,8 @@ class I3Calorimetry(I3Extractor):
                 )
             ):
                 self.warning(
-                    "No energy deposited in the hull,"
-                    "Think about in creasing the padding."
+                    "No energy deposited in the hull, "
+                    "Think about increasing the padding."
                     f"\nCurrent padding: {self.hull.padding}"
                     f"\nTotal energy: {e_total}"
                     f"\nTrack energy: {e_ent_track}"
@@ -142,7 +151,7 @@ class I3Calorimetry(I3Extractor):
 
                 # total energy should always be less than the primary energy
                 assert e_total <= (
-                    primary_energy * (1 + 1e-6)
+                    primary_energy * (1 + 1e-6) + self.e_tolerance
                 ), "Total energy on entrance is greater than primary energy\
                     \nTotal energy: {}\
                     \nPrimary energy: {}\
