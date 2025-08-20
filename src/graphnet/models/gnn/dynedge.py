@@ -106,7 +106,9 @@ class DynEdge(GNN):
 
         assert isinstance(dynedge_layer_sizes, list)
         assert len(dynedge_layer_sizes)
-        assert all(isinstance(sizes, tuple) for sizes in dynedge_layer_sizes)
+        assert all(
+            isinstance(sizes, (tuple, list)) for sizes in dynedge_layer_sizes
+        )
         assert all(len(sizes) > 0 for sizes in dynedge_layer_sizes)
         assert all(
             all(size > 0 for size in sizes) for sizes in dynedge_layer_sizes
