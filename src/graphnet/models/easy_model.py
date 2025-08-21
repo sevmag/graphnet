@@ -36,6 +36,9 @@ class EasySyntax(Model):
         scheduler_class: Optional[type] = None,
         scheduler_kwargs: Optional[Dict] = None,
         scheduler_config: Optional[Dict] = None,
+        train_log_kwargs: Optional[Dict] = None,
+        val_log_kwargs: Optional[Dict] = None,
+        test_log_kwargs: Optional[Dict] = None,
     ) -> None:
         """Construct `StandardModel`."""
         # Base class constructor
@@ -52,6 +55,36 @@ class EasySyntax(Model):
         self._scheduler_class = scheduler_class
         self._scheduler_kwargs = scheduler_kwargs or dict()
         self._scheduler_config = scheduler_config or dict()
+
+        if train_log_kwargs is None:
+            self.train_log_kwargs = {
+                "prog_bar": True,
+                "on_epoch": True,
+                "on_step": False,
+                "sync_dist": True,
+            }
+        else:
+            self.train_log_kwargs = train_log_kwargs
+
+        if val_log_kwargs is None:
+            self.val_log_kwargs = {
+                "prog_bar": True,
+                "on_epoch": True,
+                "on_step": False,
+                "sync_dist": True,
+            }
+        else:
+            self.val_log_kwargs = val_log_kwargs
+
+        if test_log_kwargs is None:
+            self.test_log_kwargs = {
+                "prog_bar": True,
+                "on_epoch": True,
+                "on_step": False,
+                "sync_dist": True,
+            }
+        else:
+            self.test_log_kwargs = test_log_kwargs
 
         self.validate_tasks()
 
@@ -247,10 +280,7 @@ class EasySyntax(Model):
             "train_loss",
             loss,
             batch_size=self._get_batch_size(train_batch),
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False,
-            sync_dist=True,
+            **self.train_log_kwargs,
         )
 
         current_lr = self.trainer.optimizers[0].param_groups[0]["lr"]
@@ -268,10 +298,7 @@ class EasySyntax(Model):
             "val_loss",
             loss,
             batch_size=self._get_batch_size(val_batch),
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False,
-            sync_dist=True,
+            **self.val_log_kwargs,
         )
         return loss
 
@@ -286,10 +313,7 @@ class EasySyntax(Model):
             "test_loss",
             loss,
             batch_size=self._get_batch_size(val_batch),
-            prog_bar=True,
-            on_epoch=True,
-            on_step=False,
-            sync_dist=True,
+            **self.test_log_kwargs,
         )
         return loss
 
