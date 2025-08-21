@@ -128,6 +128,8 @@ class I3GenericExtractor(I3Extractor):
             except RuntimeError:
                 if self._verbose:
                     self.debug(f"Key {key} in frame not supported. Skipping.")
+                if self._verbose:
+                    self.debug(f"Key {key} in frame not supported. Skipping.")
             except KeyError:
                 if not self._skip_empty_keys:
                     results[key] = None
