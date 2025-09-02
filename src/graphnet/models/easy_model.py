@@ -17,6 +17,7 @@ from pytorch_lightning.loggers import Logger as LightningLogger
 from graphnet.training.callbacks import ProgressBar
 from graphnet.models.model import Model
 from graphnet.models.task import StandardLearnedTask
+from pytorch_lightning import LightningDataModule
 
 
 class EasySyntax(Model):
@@ -145,8 +146,9 @@ class EasySyntax(Model):
 
     def fit(
         self,
-        train_dataloader: DataLoader,
+        train_dataloader: Optional[DataLoader] = None,
         val_dataloader: Optional[DataLoader] = None,
+        datamodule: Optional[LightningDataModule] = None,
         *,
         max_epochs: int = 10,
         early_stopping_patience: int = 5,
@@ -161,6 +163,18 @@ class EasySyntax(Model):
     ) -> None:
         """Fit `StandardModel` using `pytorch_lightning.Trainer`."""
         # Checks
+        if train_dataloader is None and datamodule is None:
+            raise ValueError(
+                "Either train_dataloader or datamodule must be provided."
+            )
+        if train_dataloader is not None and datamodule is not None:
+            raise ValueError(
+                "Both train_dataloader and datamodule cannot be provided."
+            )
+        if datamodule is not None and val_dataloader is not None:
+            raise ValueError(
+                "Both datamodule and val_dataloader cannot be provided."
+            )
         if callbacks is None:
             # We create the bare-minimum callbacks for you.
             callbacks = self._create_default_callbacks(
@@ -199,7 +213,11 @@ class EasySyntax(Model):
 
         try:
             trainer.fit(
-                self, train_dataloader, val_dataloader, ckpt_path=ckpt_path
+                self,
+                train_dataloader,
+                val_dataloader,
+                datamodule=datamodule,
+                ckpt_path=ckpt_path,
             )
         except KeyboardInterrupt:
             self.warning("[ctrl+c] Exiting gracefully.")
