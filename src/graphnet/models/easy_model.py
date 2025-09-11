@@ -356,7 +356,7 @@ class EasySyntax(Model):
     def test_step(
         self, val_batch: Union[Data, List[Data]], batch_idx: int
     ) -> Tensor:
-        """Perform validation step."""
+        """Perform test step."""
         if isinstance(val_batch, Data):
             val_batch = [val_batch]
         loss = self.shared_step(val_batch, batch_idx)
@@ -377,7 +377,6 @@ class EasySyntax(Model):
         **trainer_kwargs: Any,
     ) -> List[Tensor]:
         """Return predictions for `dataloader`."""
-        self.inference()
         self.train(mode=False)
 
         callbacks = self._create_default_callbacks(
