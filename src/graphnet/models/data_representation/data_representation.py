@@ -392,18 +392,26 @@ class DataRepresentation(Model):
             for key, value in truth_dict.items():
                 try:
                     label = torch.tensor(value)
-                    if self._repeat_labels:
-                        label = self._label_repeater(label, data)
-                    data[key] = label
                 except TypeError:
                     # Cannot convert `value` to Tensor due to its data type,
                     # e.g. `str`.
-                    self.debug(
-                        (
-                            f"Could not assign `{key}` with type "
-                            f"'{type(value).__name__}' as attribute to data."
+                    try:
+                        value = value.astype(float)
+                        label = torch.tensor(value)
+                    except Exception:
+                        # Cannot convert `value` to Tensor due to its data
+                        # type, e.g. `list` of `str`.
+                        self.debug(
+                            (
+                                f"Could not assign `{key}` with type "
+                                f"'{type(value).__name__}' as attribute "
+                                "to data."
+                            )
                         )
-                    )
+                        return data
+                if self._repeat_labels:
+                    label = self._label_repeater(label, data)
+                data[key] = label
         return data
 
     @abstractmethod
