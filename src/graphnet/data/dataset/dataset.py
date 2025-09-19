@@ -259,6 +259,7 @@ class Dataset(
         loss_weight_default_value: Optional[float] = None,
         seed: Optional[int] = None,
         labels: Optional[Dict[str, Any]] = None,
+        selection_dtype: Optional[Type] = None,
     ):
         """Construct Dataset.
 
@@ -306,7 +307,9 @@ class Dataset(
                 events ~ event_no % 5 > 0"`).
             data_representation: Method that defines the data representation.
             labels: Dictionary of labels to be added to the dataset.
-
+            selection_dtype: Type to cast the queried dataframe to. Usefully,
+                e.g. when one wants to select only events with `charge` > 1.5,
+                but charge is stored as an object in the input file.
             graph_definition: Method that defines the graph representation.
                 NOTE: DEPRECATED Use `data_representation` instead.
                 # DEPRECATION: REMOVE AT 2.0 LAUNCH
@@ -334,6 +337,7 @@ class Dataset(
         self._index_column = index_column
         self._truth_table = truth_table
         self._loss_weight_default_value = loss_weight_default_value
+        self._selection_dtype = selection_dtype
 
         if data_representation is None:
             if graph_definition is not None:
@@ -378,7 +382,7 @@ class Dataset(
 
         self._selection = None
         if self._string_selection:
-            # Broken into multple lines lines for length
+            # Broken into multple lines for length
             col = self._string_column
             condition = str(tuple(self._string_selection))
             self._selection = f"{col} in {condition}"
@@ -404,6 +408,7 @@ class Dataset(
             self,
             index_column=index_column,
             seed=seed,
+            dtype=selection_dtype,
         )
 
         if self._labels is not None:
