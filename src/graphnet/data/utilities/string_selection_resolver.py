@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING, Union, Dict, Any
 
 import pandas as pd
 
@@ -53,12 +53,14 @@ class StringSelectionResolver(Logger):
         index_column: str,
         seed: Optional[int] = None,
         use_cache: bool = True,
+        dtype: Any = None,
     ):
         """Construct `StringSelectionResolver`."""
         self._dataset = dataset
         self._index_column = index_column
         self._seed = seed
         self._use_cache = use_cache
+        self._dtype = dtype or None
 
         # Base class constructor
         super().__init__(name=__name__, class_name=self.__class__.__name__)
@@ -223,6 +225,7 @@ class StringSelectionResolver(Logger):
                     list(variables),
                 ),
                 columns=list(variables),
+                dtype=self._dtype,
             )
 
         # (Opt.) Cache indices.
