@@ -390,7 +390,7 @@ class TheosMuonEUpgoing(CNN):
         self.mlps = nn.Sequential(
             nn.Linear(500, 120),
             nn.Linear(120, 64),
-            nn.Linear(64, 16),
+            nn.Linear(64, nb_outputs),
         )
 
     def forward(self, data: Data) -> torch.Tensor:
