@@ -217,36 +217,76 @@ class I3Calorimetry(I3Extractor):
             # energy at the entrance and exit of the hull.
             # NOTE: We do not consider daughters of tracks,
             # because they are already included in the track energy.
-            if particle.is_track & (particle.id in track_lookup):
-                track = track_lookup[particle.id]
+            if particle.is_track:
+                if particle.id in track_lookup:
+                    track = track_lookup[particle.id]
 
-                # Find distance to entrance and exit from sampling volume
-                intersections = self.hull.surface.intersection(
-                    track.pos, track.dir
-                )
-                # Get the corresponding energies
-                try:
-                    e0 = track.get_energy(intersections.first)
-                    e1 = track.get_energy(intersections.second)
+                    # Find distance to entrance and exit from sampling volume
+                    intersections = self.hull.surface.intersection(
+                        track.pos, track.dir
+                    )
+                    # Get the corresponding energies
+                    try:
+                        e0 = track.get_energy(intersections.first)
+                        e1 = track.get_energy(intersections.second)
 
-                # Catch MuonGun errors
-                except RuntimeError as e:
-                    if (
-                        "sum of losses is smaller than "
-                        "energy at last checkpoint" in str(e)
-                    ):
-                        hdr = frame["I3EventHeader"]
-                        e.add_note(f"Error in MuonGun track in event {hdr}")
-                        self.warning(f"Skipping bad event {hdr}: {e}")
-                        e0 = np.nan
-                        e1 = np.nan
+                    # Catch MuonGun errors
+                    except RuntimeError as e:
+                        if (
+                            "sum of losses is smaller than "
+                            "energy at last checkpoint" in str(e)
+                        ):
+                            hdr = frame["I3EventHeader"]
+                            e.add_note(
+                                f"Error in MuonGun track in event {hdr}"
+                            )
+                            self.warning(f"Skipping bad event {hdr}: {e}")
+                            e0 = np.nan
+                            e1 = np.nan
+                            e_cascade = np.nan
+                            continue  # skip this frame
+                        else:
+                            raise  # re-raise unexpected errors
+
+                    e_dep_track += e0 - e1
+                    e_ent_track += e0
+                else:
+                    if self.is_in_hull(particle):
+                        # Track is not in the MMCTrackList, but is in the hull.
+                        # We do not have the necessary information to
+                        # calculate its energy, so we set everything to NaN
+                        # and skip this frame.
+                        self.warning(
+                            "Track in I3MCTree not found in MMCTrackList.\
+                                \nCan happen if padding is too large.\
+                                \nParticle: {}\
+                                \nEvent header: {}".format(
+                                particle, frame["I3EventHeader"]
+                            )
+                        )
+                        e_ent_track = np.nan
+                        e_dep_track = np.nan
                         e_cascade = np.nan
                         continue  # skip this frame
                     else:
-                        raise  # re-raise unexpected errors
-
-                e_dep_track += e0 - e1
-                e_ent_track += e0
+                        # Track is not in the MMCTrackList and not in the hull,
+                        # so we can savely consider its daughters.
+                        (
+                            e_cascade,
+                            e_dep_track,
+                            e_ent_track,
+                        ) = tuple(
+                            np.add(
+                                (e_cascade, e_dep_track, e_ent_track),
+                                self.get_energies(
+                                    frame,
+                                    dataclasses.I3MCTree.get_daughters(
+                                        frame[self.mctree], particle
+                                    ),
+                                    track_lookup,
+                                ),
+                            )
+                        )
             # if the particle is not in the hull, but has daughters,
             # we add the energies of the daughters.
             elif not self.is_in_hull(particle):
