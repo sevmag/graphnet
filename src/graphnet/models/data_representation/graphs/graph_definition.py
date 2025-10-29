@@ -165,7 +165,15 @@ class GraphDefinition(DataRepresentation):
             data_path=data_path,
         )
         # Create graph & get new node feature names
-        data.x = self._node_definition(data.x)
+        try:
+            data.x = self._node_definition(data.x)
+        except Exception as e:
+            e.add_note(
+                "Error occurred during node definition processing. \n"
+                f"Event No: {data.event_no} \n"
+                f"Dataset paths: {data.dataset_path}"
+            )
+            raise e
         if self._sort_by is not None:
             data.x = data.x[data.x[:, self._sort_by].sort()[1]]
 
