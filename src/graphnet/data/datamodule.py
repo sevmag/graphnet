@@ -264,11 +264,15 @@ class GraphNeTDataModule(pl.LightningDataModule, Logger):
         Returns:
             DataLoader: The DataLoader configured for the given dataset.
         """
-        if dataset == self._train_dataset:
+        if hasattr(self, "_train_dataset") and (
+            dataset == self._train_dataset
+        ):
             dataloader_args = self._train_dataloader_kwargs
-        elif dataset == self._val_dataset:
+        elif hasattr(self, "_val_dataset") and (dataset == self._val_dataset):
             dataloader_args = self._validation_dataloader_kwargs
-        elif dataset == self._test_dataset:
+        elif hasattr(self, "_test_dataset") and (
+            dataset == self._test_dataset
+        ):
             dataloader_args = self._test_dataloader_kwargs
         else:
             raise ValueError(
