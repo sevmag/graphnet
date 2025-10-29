@@ -238,6 +238,9 @@ class cluster_and_pad:
         # for assertions later
         self._sort_by = sort_by
 
+        if len(x) == 0:
+            raise ValueError("Input array is empty")
+
         sort_cols = sort_by + cluster_columns
 
         x = lex_sort(x=x, cluster_columns=sort_cols)
