@@ -2,6 +2,14 @@
 
 All loss functions inherit from `LossFunction` which ensures a common syntax,
 handles per-event weights, etc.
+
+This file includes code from Alibaba-MIIL (© 2020),
+licensed under the MIT License.
+See https://github.com/Alibaba-MIIL/ASL/blob/main/LICENSE
+for the full license text.
+
+The GitHub repository of Alibaba-MIIL can be found at:
+https://github.com/Alibaba-MIIL/ASL
 """
 
 from abc import abstractmethod
@@ -622,3 +630,45 @@ class RMSEVonMisesFisher3DLoss(EnsembleLoss):
             loss_factors=[1, vmfs_factor],
             prediction_keys=[[0, 1, 2], [0, 1, 2, 3]],
         )
+
+
+class ASLBinary(LossFunction):
+    """Asymmetric Loss function for Binary Classification.
+
+    Adapted from
+    https://github.com/Alibaba-MIIL/ASL
+    """
+
+    def __init__(
+        self, gamma_pos: int = 0, gamma_neg: int = 4, from_logits: bool = True
+    ):
+        """Construct ASLBinary loss function.
+
+        Args:
+            gamma_pos: Focusing parameter for positive samples.
+            gamma_neg: Focusing parameter for negative samples.
+            from_logits: Whether the predictions are logits.
+        """
+        super().__init__()
+        self.gamma_pos = gamma_pos
+        self.gamma_neg = gamma_neg
+        self.from_logits = from_logits
+
+    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        target = target.float().view_as(prediction)
+        if self.from_logits:
+            prob_pos = torch.sigmoid(prediction)
+            log_prob_pos = nn.functional.logsigmoid(prediction)
+            log_prob_neg = nn.functional.logsigmoid(-prediction)
+        else:
+            prob_pos = prediction
+            log_prob_pos = torch.log(prediction)
+            log_prob_neg = torch.log(1 - prediction)
+
+        weight = torch.pow(
+            torch.abs(
+                target - prob_pos
+            ),  # (1 - p) for positives, p for negatives
+            self.gamma_pos * target + self.gamma_neg * (1 - target),
+        )
+        return -(target * log_prob_pos + (1 - target) * log_prob_neg) * weight
