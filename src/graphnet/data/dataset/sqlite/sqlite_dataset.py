@@ -76,6 +76,13 @@ class SQLiteDataset(Dataset):
                 f"SELECT {columns} FROM {table} WHERE "
                 f"{combined_selections}"
             ).fetchall()
+            if len(result) == 0:
+                raise IndexError(
+                    f"No entries found in table `{table}` for "
+                    f"index `{index}` with selection "
+                    f"`{combined_selections}`."
+                    f"file: {self._path}"
+                )
         except sqlite3.OperationalError as e:
             if "no such column" in str(e):
                 raise ColumnMissingException(str(e))
