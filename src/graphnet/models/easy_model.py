@@ -308,6 +308,50 @@ class EasySyntax(Model):
 
         return pred
 
+    def test_step(
+        self, val_batch: Union[Data, List[Data]], batch_idx: int
+    ) -> Tensor:
+        """Perform validation step."""
+        if isinstance(val_batch, Data):
+            val_batch = [val_batch]
+        loss = self.shared_step(val_batch, batch_idx)
+        self.log(
+            "test_loss",
+            loss,
+            batch_size=self._get_batch_size(val_batch),
+            prog_bar=True,
+            on_epoch=True,
+            on_step=False,
+            sync_dist=True,
+        )
+        return loss
+
+    def test(
+        self,
+        dataloader: DataLoader,
+        logger: Optional[LightningLogger] = None,
+        gpus: Optional[Union[List[int], int]] = None,
+        distribution_strategy: Optional[str] = "auto",
+        **trainer_kwargs: Any,
+    ) -> List[Tensor]:
+        """Return predictions for `dataloader`."""
+        self.inference()
+        self.train(mode=False)
+
+        callbacks = self._create_default_callbacks(
+            val_dataloader=None,
+        )
+
+        inference_trainer = self._construct_trainer(
+            gpus=gpus,
+            distribution_strategy=distribution_strategy,
+            callbacks=callbacks,
+            logger=logger,
+            **trainer_kwargs,
+        )
+
+        return inference_trainer.test(self, dataloader)
+
     def inference(self) -> None:
         """Activate inference mode."""
         for task in self._tasks:
