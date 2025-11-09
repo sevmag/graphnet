@@ -346,12 +346,6 @@ class EasySyntax(Model):
         predictions_list = inference_trainer.predict(self, dataloader)
         assert len(predictions_list), "Got no predictions"
 
-        # nb_outputs = len(predictions_list[0])
-        # predictions: List[Tensor] = [
-        #     torch.cat([preds[ix] for preds in predictions_list], dim=0)
-        #     for ix in range(nb_outputs)
-        # ]
-
         # Concatenate predictions for the tasks
         # NOTE: Only the model predicted values at this point are torch.Tensors
         # and occupy the first len(self.prediction_labels) entries in the list,
