@@ -122,8 +122,8 @@
     <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=75810a84" />
     <link rel="stylesheet" type="text/css" href="../../../_static/material.css?v=79c92029" />
     <script src="../../../_static/documentation_options.js?v=5929fcd5"></script>
-    <script src="../../../_static/doctools.js?v=9bcbadda"></script>
-    <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <link rel="icon" href="../../../_static/favicon.svg"/>
     <link rel="index" title="Index" href="../../../genindex.html" />
     <link rel="search" title="Search" href="../../../search.html" />
@@ -280,7 +280,7 @@
     <li class="md-nav__item">
     
     
-      <a href="../../../installation/install.html" class="md-nav__link">Installation</a>
+      <a href="../../../installation/install.html" class="md-nav__link">Quick Start</a>
       
     
     </li>
@@ -1019,6 +1019,26 @@
             <span class="n">prediction_keys</span><span class="o">=</span><span class="p">[[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">],</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">]],</span>
         <span class="p">)</span></div>
 
+
+
+<div class="viewcode-block" id="NegCosLoss">
+<a class="viewcode-back" href="../../../api/graphnet.training.loss_functions.html#graphnet.training.loss_functions.NegCosLoss">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">NegCosLoss</span><span class="p">(</span><span class="n">LossFunction</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">"""Negative Cosine error loss."""</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">prediction</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span> <span class="n">target</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tensor</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">"""Implement loss calculation."""</span>
+        <span class="c1"># Check(s)</span>
+        <span class="k">assert</span> <span class="n">prediction</span><span class="o">.</span><span class="n">dim</span><span class="p">()</span> <span class="o">==</span> <span class="mi">2</span>
+        <span class="k">if</span> <span class="n">target</span><span class="o">.</span><span class="n">dim</span><span class="p">()</span> <span class="o">!=</span> <span class="n">prediction</span><span class="o">.</span><span class="n">dim</span><span class="p">():</span>
+            <span class="n">target</span> <span class="o">=</span> <span class="n">target</span><span class="o">.</span><span class="n">squeeze</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="n">prediction</span><span class="o">.</span><span class="n">size</span><span class="p">()</span> <span class="o">==</span> <span class="n">target</span><span class="o">.</span><span class="n">size</span><span class="p">()</span>
+
+        <span class="n">reco_norm</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">functional</span><span class="o">.</span><span class="n">normalize</span><span class="p">(</span><span class="n">prediction</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">orig_norm</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">functional</span><span class="o">.</span><span class="n">normalize</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">elements</span> <span class="o">=</span> <span class="o">-</span><span class="p">(</span><span class="n">reco_norm</span> <span class="o">*</span> <span class="n">orig_norm</span><span class="p">)</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">elements</span></div>
+
 </pre></div>
 
           </article>
@@ -1039,11 +1059,11 @@
       <div class="md-footer-meta__inner md-grid">
         <div class="md-footer-copyright">
           <div class="md-footer-copyright__highlight">
-              &#169; Copyright 2021-2025, GraphNeT team.
+              &#169; Copyright 2021-2026, GraphNeT team.
               
           </div>
             Created using
-            <a href="http://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+            <a href="http://www.sphinx-doc.org/">Sphinx</a> 9.0.4.
              and
             <a href="https://github.com/bashtage/sphinx-material/">Material for
               Sphinx</a>

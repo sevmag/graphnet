@@ -122,8 +122,8 @@
     <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=75810a84" />
     <link rel="stylesheet" type="text/css" href="../_static/material.css?v=79c92029" />
     <script src="../_static/documentation_options.js?v=5929fcd5"></script>
-    <script src="../_static/doctools.js?v=9bcbadda"></script>
-    <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <link rel="icon" href="../_static/favicon.svg"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
@@ -279,7 +279,7 @@
     <li class="md-nav__item">
     
     
-      <a href="../installation/install.html" class="md-nav__link">Installation</a>
+      <a href="../installation/install.html" class="md-nav__link">Quick Start</a>
       
     
     </li>
@@ -355,6 +355,7 @@
 <li><a href="graphnet/data/dataloader.html">graphnet.data.dataloader</a></li>
 <li><a href="graphnet/data/datamodule.html">graphnet.data.datamodule</a></li>
 <li><a href="graphnet/data/dataset/dataset.html">graphnet.data.dataset.dataset</a></li>
+<li><a href="graphnet/data/dataset/lmdb/lmdb_dataset.html">graphnet.data.dataset.lmdb.lmdb_dataset</a></li>
 <li><a href="graphnet/data/dataset/parquet/parquet_dataset.html">graphnet.data.dataset.parquet.parquet_dataset</a></li>
 <li><a href="graphnet/data/dataset/samplers.html">graphnet.data.dataset.samplers</a></li>
 <li><a href="graphnet/data/dataset/sqlite/sqlite_dataset.html">graphnet.data.dataset.sqlite.sqlite_dataset</a></li>
@@ -384,6 +385,7 @@
 <li><a href="graphnet/data/extractors/icecube/utilities/i3_in_ice_neutrino.html">graphnet.data.extractors.icecube.utilities.i3_in_ice_neutrino</a></li>
 <li><a href="graphnet/data/extractors/icecube/utilities/types.html">graphnet.data.extractors.icecube.utilities.types</a></li>
 <li><a href="graphnet/data/extractors/internal/parquet_extractor.html">graphnet.data.extractors.internal.parquet_extractor</a></li>
+<li><a href="graphnet/data/extractors/internal/sqlite_extractor.html">graphnet.data.extractors.internal.sqlite_extractor</a></li>
 <li><a href="graphnet/data/extractors/km3net/km3netextractor.html">graphnet.data.extractors.km3net.km3netextractor</a></li>
 <li><a href="graphnet/data/extractors/km3net/km3netpulseextractor.html">graphnet.data.extractors.km3net.km3netpulseextractor</a></li>
 <li><a href="graphnet/data/extractors/km3net/km3nettruthextractor.html">graphnet.data.extractors.km3net.km3nettruthextractor</a></li>
@@ -395,14 +397,17 @@
 <li><a href="graphnet/data/readers/graphnet_file_reader.html">graphnet.data.readers.graphnet_file_reader</a></li>
 <li><a href="graphnet/data/readers/i3reader.html">graphnet.data.readers.i3reader</a></li>
 <li><a href="graphnet/data/readers/internal_parquet_reader.html">graphnet.data.readers.internal_parquet_reader</a></li>
+<li><a href="graphnet/data/readers/internal_sqlite_reader.html">graphnet.data.readers.internal_sqlite_reader</a></li>
 <li><a href="graphnet/data/readers/km3netreader.html">graphnet.data.readers.km3netreader</a></li>
 <li><a href="graphnet/data/readers/liquido_reader.html">graphnet.data.readers.liquido_reader</a></li>
 <li><a href="graphnet/data/readers/prometheus_reader.html">graphnet.data.readers.prometheus_reader</a></li>
 <li><a href="graphnet/data/sqlite/deprecated_methods.html">graphnet.data.sqlite.deprecated_methods</a></li>
+<li><a href="graphnet/data/utilities/lmdb_utilities.html">graphnet.data.utilities.lmdb_utilities</a></li>
 <li><a href="graphnet/data/utilities/random.html">graphnet.data.utilities.random</a></li>
 <li><a href="graphnet/data/utilities/sqlite_utilities.html">graphnet.data.utilities.sqlite_utilities</a></li>
 <li><a href="graphnet/data/utilities/string_selection_resolver.html">graphnet.data.utilities.string_selection_resolver</a></li>
 <li><a href="graphnet/data/writers/graphnet_writer.html">graphnet.data.writers.graphnet_writer</a></li>
+<li><a href="graphnet/data/writers/lmdb_writer.html">graphnet.data.writers.lmdb_writer</a></li>
 <li><a href="graphnet/data/writers/parquet_writer.html">graphnet.data.writers.parquet_writer</a></li>
 <li><a href="graphnet/data/writers/sqlite_writer.html">graphnet.data.writers.sqlite_writer</a></li>
 <li><a href="graphnet/datasets/prometheus_datasets.html">graphnet.datasets.prometheus_datasets</a></li>
@@ -430,6 +435,7 @@
 <li><a href="graphnet/models/detector/icecube.html">graphnet.models.detector.icecube</a></li>
 <li><a href="graphnet/models/detector/liquido.html">graphnet.models.detector.liquido</a></li>
 <li><a href="graphnet/models/detector/magic.html">graphnet.models.detector.magic</a></li>
+<li><a href="graphnet/models/detector/nubench.html">graphnet.models.detector.nubench</a></li>
 <li><a href="graphnet/models/detector/prometheus.html">graphnet.models.detector.prometheus</a></li>
 <li><a href="graphnet/models/easy_model.html">graphnet.models.easy_model</a></li>
 <li><a href="graphnet/models/gnn/RNN_tito.html">graphnet.models.gnn.RNN_tito</a></li>
@@ -443,6 +449,7 @@
 <li><a href="graphnet/models/gnn/particlenet.html">graphnet.models.gnn.particlenet</a></li>
 <li><a href="graphnet/models/model.html">graphnet.models.model</a></li>
 <li><a href="graphnet/models/normalizing_flow.html">graphnet.models.normalizing_flow</a></li>
+<li><a href="graphnet/models/pretraining_maskpred.html">graphnet.models.pretraining_maskpred</a></li>
 <li><a href="graphnet/models/rnn/node_rnn.html">graphnet.models.rnn.node_rnn</a></li>
 <li><a href="graphnet/models/standard_averaged_model.html">graphnet.models.standard_averaged_model</a></li>
 <li><a href="graphnet/models/standard_model.html">graphnet.models.standard_model</a></li>
@@ -488,11 +495,11 @@
       <div class="md-footer-meta__inner md-grid">
         <div class="md-footer-copyright">
           <div class="md-footer-copyright__highlight">
-              &#169; Copyright 2021-2025, GraphNeT team.
+              &#169; Copyright 2021-2026, GraphNeT team.
               
           </div>
             Created using
-            <a href="http://www.sphinx-doc.org/">Sphinx</a> 8.2.3.
+            <a href="http://www.sphinx-doc.org/">Sphinx</a> 9.0.4.
              and
             <a href="https://github.com/bashtage/sphinx-material/">Material for
               Sphinx</a>
