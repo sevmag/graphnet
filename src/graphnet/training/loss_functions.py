@@ -626,7 +626,13 @@ class _DirectionalDistributionLoss(LossFunction):
     _loss_fn: Any
 
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
-        target = target.reshape(-1, 3)
+        # Targets typically arrive as float64 (numpy/SQL default) while the
+        # model emits float32. The package's losses use torch.einsum, which
+        # is strict about matching dtypes (unlike `*` / `torch.sum`, which
+        # silently promote and let vMF get away with mixed precision). Cast
+        # the target to the prediction's dtype so the loss runs in the same
+        # precision as training.
+        target = target.reshape(-1, 3).to(prediction.dtype)
         assert prediction.dim() == 2 and prediction.size(1) == self._n_params
         assert prediction.size(0) == target.size(0)
         return type(self)._loss_fn(prediction, target, reduction="none")
