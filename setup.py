@@ -28,6 +28,7 @@ INSTALL_REQUIRES = [
     "torchscale==0.2.0",
     "h5py>= 3.7.0",
     "lmdb>=1.4.1",
+    "directional-distributions",
 ]
 
 # Security: pytorch-lightning versions 2.6.2 and 2.6.3 were compromised in a
