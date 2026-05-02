@@ -69,6 +69,45 @@ class DirectionReconstructionWithKappa(StandardLearnedTask):
         return torch.stack((vec_x, vec_y, vec_z, kappa), dim=1)
 
 
+class DirectionReconstructionWithGAG(StandardLearnedTask):
+    """Reconstructs direction parameterised by the General Angular Gaussian.
+
+    Pairs with `GeneralAngularGaussianLoss`. The 9 outputs are the raw
+    parameters the loss expects, in the same column order:
+
+    * cols 0..2 (`dir_x_pred`, `dir_y_pred`, `dir_z_pred`): unnormalised
+      mean vector ``mu``. The unit mean direction on the sphere is
+      ``mu / ||mu||``; the magnitude ``||mu||`` controls concentration.
+    * cols 3..5 (`gag_log_L11`, `gag_log_L22`, `gag_log_L33`): raw
+      log-diagonal entries of the Cholesky factor ``L`` of ``V^{-1}``.
+      The package centres these so that ``det(L) = 1``.
+    * cols 6..8 (`gag_L21`, `gag_L31`, `gag_L32`): lower-triangular
+      off-diagonal entries of ``L``.
+
+    See ``directional_distributions.ag.gag_nll_loss`` (and Paine et al.
+    2018, Stat Comput 28:689-697) for the full parameterisation.
+    """
+
+    # Target is the same compound `direction` label as vMF.
+    default_target_labels = ["direction"]  # dir_x, dir_y, dir_z
+    default_prediction_labels = [
+        "dir_x_pred",
+        "dir_y_pred",
+        "dir_z_pred",
+        "gag_log_L11",
+        "gag_log_L22",
+        "gag_log_L33",
+        "gag_L21",
+        "gag_L31",
+        "gag_L32",
+    ]
+    nb_inputs = 9
+
+    def _forward(self, x: Tensor) -> Tensor:
+        # GAG expects raw, unconstrained parameters: pass through as-is.
+        return x
+
+
 class ZenithReconstruction(StandardLearnedTask):
     """Reconstructs zenith angle."""
 
