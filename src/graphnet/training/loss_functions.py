@@ -18,6 +18,11 @@ from torch.nn.functional import (
     binary_cross_entropy_with_logits,
     softplus,
 )
+from directional_distributions import (
+    iag_nll_loss,
+    esag_nll_loss,
+    gag_nll_loss,
+)
 
 from graphnet.models.model import Model
 from graphnet.utilities.decorators import final
@@ -608,6 +613,56 @@ class RMSEVonMisesFisher3DLoss(EnsembleLoss):
             loss_factors=[1, vmfs_factor],
             prediction_keys=[[0, 1, 2], [0, 1, 2, 3]],
         )
+
+
+class _DirectionalDistributionLoss(LossFunction):
+    """Adapter for losses from the `directional-distributions` package.
+
+    Subclasses set `_n_params` (prediction width) and `_loss_fn` (callable
+    `(pred, y_true, reduction) -> Tensor`).
+    """
+
+    _n_params: int
+    _loss_fn: Any
+
+    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        target = target.reshape(-1, 3)
+        assert prediction.dim() == 2 and prediction.size(1) == self._n_params
+        assert prediction.size(0) == target.size(0)
+        return type(self)._loss_fn(prediction, target, reduction="none")
+
+
+class IsotropicAngularGaussianLoss(_DirectionalDistributionLoss):
+    """Isotropic Angular Gaussian NLL on S^2.
+
+    Prediction shape [N, 3] (mean vector mu; concentration = ||mu||).
+    Target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 3
+    _loss_fn = staticmethod(iag_nll_loss)
+
+
+class EllipticallySymmetricAngularGaussianLoss(_DirectionalDistributionLoss):
+    """Elliptically Symmetric Angular Gaussian NLL on S^2.
+
+    Prediction shape [N, 5]: columns 0:3 are mu, columns 3:5 are gamma.
+    Target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 5
+    _loss_fn = staticmethod(esag_nll_loss)
+
+
+class GeneralAngularGaussianLoss(_DirectionalDistributionLoss):
+    """General Angular Gaussian NLL on S^2.
+
+    Prediction shape [N, 9]: 0:3 mu, 3:6 raw log-diagonal of Cholesky L,
+    6:9 off-diagonal (L_21, L_31, L_32). Target shape [N, 3].
+    """
+
+    _n_params = 9
+    _loss_fn = staticmethod(gag_nll_loss)
 
 
 class NegCosLoss(LossFunction):
