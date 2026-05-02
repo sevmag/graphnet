@@ -28,7 +28,7 @@ INSTALL_REQUIRES = [
     "torchscale==0.2.0",
     "h5py>= 3.7.0",
     "lmdb>=1.4.1",
-    "directional-distributions",
+    "directional-distributions @ git+https://github.com/felixyu7/directional-distributions.git",
 ]
 
 EXTRAS_REQUIRE = {
