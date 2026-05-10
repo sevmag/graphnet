@@ -1,7 +1,7 @@
 """Curated datasets from the NuBench benchmark suite (arXiv:2511.13111)."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Type, Union
+from typing import Dict, Any, List, Optional, Tuple, Type, Union
 import os
 
 import pandas as pd
@@ -193,6 +193,8 @@ class NuBenchDataset(ERDAHostedDataset):
         name: str,
         download_dir: str,
         data_representation: DataRepresentation,
+        train_selection: Optional[List[int]] = None,
+        test_selection: Optional[List[int]] = None,
         **kwargs: Any,
     ) -> None:
         """Construct a NuBench dataset by registry name.
@@ -204,6 +206,12 @@ class NuBenchDataset(ERDAHostedDataset):
                 dataset into.
             data_representation: Data representation whose detector
                 must match the one expected by the selected dataset.
+            train_selection: Optional list of ``event_no`` to use for
+                the train split, overriding the default selection file.
+                Must be a subset of the default train selection.
+            test_selection: Optional list of ``event_no`` to use for
+                the test split, overriding the default selection file.
+                Must be a subset of the default test selection.
             **kwargs: Forwarded to :class:`ERDAHostedDataset`.
         """
         if name not in self._registry:
@@ -223,6 +231,8 @@ class NuBenchDataset(ERDAHostedDataset):
 
         self._name = name
         self._spec = spec
+        self._custom_train_selection = train_selection
+        self._custom_test_selection = test_selection
         self._experiment = spec.experiment
         self._comments = spec.comments
         self._features = spec.features
@@ -286,6 +296,15 @@ class NuBenchDataset(ERDAHostedDataset):
             )
         )["event_no"].tolist()
 
+        if self._custom_train_selection is not None:
+            train_sel = self._apply_custom_selection(
+                self._custom_train_selection, train_sel, "train"
+            )
+        if self._custom_test_selection is not None:
+            test_sel = self._apply_custom_selection(
+                self._custom_test_selection, test_sel, "test"
+            )
+
         dataset_args = {
             "path": db_path,
             "pulsemaps": self._pulsemaps,
@@ -305,6 +324,20 @@ class NuBenchDataset(ERDAHostedDataset):
             },
         }
         return dataset_args, train_sel, test_sel
+
+    @staticmethod
+    def _apply_custom_selection(
+        custom: List[int], default: List[int], split: str
+    ) -> List[int]:
+        default_set = set(default)
+        missing = [e for e in custom if e not in default_set]
+        if missing:
+            raise ValueError(
+                f"Custom {split} selection is not a subset of the default "
+                f"{split} selection: {len(missing)} event_no(s) missing "
+                f"(e.g. {missing[:5]})."
+            )
+        return list(custom)
 
     def _create_dataset(
         self,
