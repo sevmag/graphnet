@@ -44,12 +44,11 @@ class SQLiteReader(GraphNeTFileReader):
             event_nos = file_path.event_nos
         else:
             db_path, event_nos = file_path
-        with sqlite3.connect(db_path) as conn:
-            for extractor in self._extractors:
-                assert isinstance(extractor, SQLiteExtractor)
-                output = extractor((conn, event_nos))
-                if output is not None:
-                    outputs[extractor._extractor_name] = output
+        for extractor in self._extractors:
+            assert isinstance(extractor, SQLiteExtractor)
+            output = extractor((db_path, event_nos))
+            if output is not None:
+                outputs[extractor._extractor_name] = output
         return outputs
 
     def find_files(self, path: Union[str, List[str]]) -> List[SQLiteFileSet]:
