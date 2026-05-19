@@ -503,15 +503,17 @@ def add_data_representations_to_lmdb(  # noqa: C901
     pulsemap_extractor_name: str,
     truth_extractor_name: str,
     truth_label_names: Optional[List[str]] = None,
+    event_nos: Optional[List[int]] = None,
     overwrite: bool = False,
     map_size_bytes: int = 8 * 1024 * 1024 * 1024,
     batch_size: int = 1000,
 ) -> Dict[str, "DataRepresentation"]:
     """Retroactively add precomputed data representations to an LMDB.
 
-    Walks every event in `lmdb_path`, recomputes the requested
-    `DataRepresentation`(s) from the stored raw extractor tables, and writes
-    the outputs back under `value["data_representations"][<field_name>]`. The
+    Walks every event in `lmdb_path` (or only `event_nos` if given),
+    recomputes the requested `DataRepresentation`(s) from the stored raw
+    extractor tables, and writes the outputs back under
+    `value["data_representations"][<field_name>]`. The
     `__meta_data_representations__` metadata is updated so that
     `LMDBDataset(pre_computed_representation=<field_name>)` and
     `get_data_representation_from_metadata(...)` keep working.
@@ -526,6 +528,10 @@ def add_data_representations_to_lmdb(  # noqa: C901
         truth_extractor_name: Name of the extractor providing event truth.
         truth_label_names: Optional subset of truth columns to pass to
             `data_rep.forward(...)`.
+        event_nos: Optional subset of event numbers to process. If None
+            (default), every event in the LMDB is processed. Useful when
+            different event subsets use different `pulsemap_extractor_name`
+            values -- call once per subset.
         overwrite: If False (default), refuse to clobber any existing
             representation whose field name would collide with a newly
             assigned one. If True, conflicting names are reused.
@@ -593,7 +599,11 @@ def add_data_representations_to_lmdb(  # noqa: C901
         max_dbs=1,
     )
     try:
-        indices = get_all_indices(lmdb_path)
+        indices = (
+            list(event_nos)
+            if event_nos is not None
+            else get_all_indices(lmdb_path)
+        )
         iterator = tqdm(
             indices,
             desc=f"Adding {list(field_name_to_rep)} to LMDB",
@@ -616,8 +626,7 @@ def add_data_representations_to_lmdb(  # noqa: C901
                 value_bytes = read_txn.get(key)
                 if value_bytes is None:
                     raise KeyError(
-                        f"Index {index} returned by get_all_indices is "
-                        f"not present in {lmdb_path!r}."
+                        f"Event {index} not present in {lmdb_path!r}."
                     )
                 value = deserializer(value_bytes)
 
