@@ -15,43 +15,14 @@ import pandas as pd
 from .graphnet_writer import GraphNeTWriter
 from graphnet.models.data_representation import DataRepresentation
 from graphnet.data.utilities.lmdb_utilities import (
+    assign_data_representation_field_names,
+    build_data_representation_metadata,
+    build_event_value,
     get_serialization_method_name,
+    write_data_representation_metadata,
     _get_data_representation_metadata_dict,
+    _resolve_serializer,
 )
-
-
-def _serialize_pickle(obj: Any) -> bytes:
-    """Serialize object using pickle."""
-    import pickle  # type: ignore
-
-    return pickle.dumps(obj)
-
-
-def _serialize_json(obj: Any) -> bytes:
-    """Serialize object using json."""
-    import json  # type: ignore
-
-    return json.dumps(obj).encode("utf-8")
-
-
-def _serialize_msgpack(obj: Any) -> bytes:
-    """Serialize object using msgpack."""
-    try:
-        import msgpack  # type: ignore
-    except ImportError as e:
-        raise ImportError("msgpack is not installed.") from e
-
-    return msgpack.packb(obj, use_bin_type=True)
-
-
-def _serialize_dill(obj: Any) -> bytes:
-    """Serialize object using dill."""
-    try:
-        import dill  # type: ignore
-    except ImportError as e:
-        raise ImportError("dill is not installed.") from e
-
-    return dill.dumps(obj)
 
 
 class LMDBWriter(GraphNeTWriter):
@@ -106,7 +77,16 @@ class LMDBWriter(GraphNeTWriter):
         else:
             self._serialization_method = "__custom__"
 
-        self._serializer = self._resolve_serializer(serialization)
+        if callable(serialization):
+            self._serializer: Callable[[Any], bytes] = serialization
+        else:
+            resolved = _resolve_serializer(serialization)
+            if resolved is None:
+                raise ValueError(
+                    "Unsupported serialization. Use 'pickle', 'json', "
+                    "'msgpack', 'dill', or a callable."
+                )
+            self._serializer = resolved
 
         # Convert single DataRepresentation to list for consistent handling
         if data_representation is None:
@@ -122,24 +102,6 @@ class LMDBWriter(GraphNeTWriter):
         self._truth_name = truth_extractor_name
         self._truth_label_names = truth_label_names
 
-    def _resolve_serializer(
-        self, serialization: Union[str, Callable[[Any], bytes]]
-    ) -> Callable[[Any], bytes]:
-        if callable(serialization):
-            return serialization
-        if serialization == "pickle":
-            return _serialize_pickle
-        if serialization == "json":
-            return _serialize_json
-        if serialization == "msgpack":
-            return _serialize_msgpack
-        if serialization == "dill":
-            return _serialize_dill
-        raise ValueError(
-            "Unsupported serialization. Use 'pickle', 'json', "
-            "'msgpack', 'dill', or a callable."
-        )
-
     def _store_serialization_metadata(self, txn: lmdb.Transaction) -> None:
         """Store serialization method metadata in the LMDB database.
 
@@ -148,73 +110,6 @@ class LMDBWriter(GraphNeTWriter):
         """
         metadata_key = b"__meta_serialization__"
         metadata_value = self._serialization_method.encode("utf-8")
-        txn.put(metadata_key, metadata_value, overwrite=True)
-
-    def _get_data_representation_field_names(
-        self,
-    ) -> Dict[str, DataRepresentation]:
-        """Get mapping of field names to data representations.
-
-        Returns a dictionary where keys are the field names used to
-        store data representations (matching the keys in
-        data_representations_output) and values are the corresponding
-        DataRepresentation instances.
-        """
-        if self._data_representations is None:
-            return {}
-
-        field_name_to_rep: Dict[str, DataRepresentation] = {}
-        class_name_counts: Dict[str, int] = {}
-
-        for data_rep in self._data_representations:
-            base_class_name = data_rep.__class__.__name__
-
-            # Track occurrences of each class name
-            if base_class_name not in class_name_counts:
-                # First occurrence - check if base name is available
-                if base_class_name in field_name_to_rep:
-                    # Base name already taken (shouldn't happen), use _0
-                    class_name_counts[base_class_name] = 0
-                    key_name = f"{base_class_name}_0"
-                else:
-                    # First occurrence - use base name
-                    class_name_counts[base_class_name] = 0
-                    key_name = base_class_name
-            else:
-                # We've seen this class name before - increment and append tag
-                class_name_counts[base_class_name] += 1
-                count = class_name_counts[base_class_name]
-                key_name = f"{base_class_name}_{count}"
-
-            field_name_to_rep[key_name] = data_rep
-
-        return field_name_to_rep
-
-    def _store_data_representation_metadata(
-        self, txn: lmdb.Transaction
-    ) -> None:
-        """Store data representation metadata in the LMDB database.
-
-        This metadata allows future readers to determine which data
-        representations were used and their configurations.
-        """
-        if self._data_representations is None:
-            return
-
-        # Get mapping of field names to data representations
-        field_name_to_rep = self._get_data_representation_field_names()
-
-        # Build metadata dictionary with configs
-        metadata_dict: Dict[str, Any] = {}
-        for field_name, data_rep in field_name_to_rep.items():
-            # Get the config and convert to dict
-            config = data_rep.config
-            # Use dict() to get a serializable representation
-            metadata_dict[field_name] = config
-
-        # Serialize the metadata dictionary
-        metadata_key = b"__meta_data_representations__"
-        metadata_value = self._serializer(metadata_dict)
         txn.put(metadata_key, metadata_value, overwrite=True)
 
     def _event_dict_from_merged_tables(
@@ -245,94 +140,6 @@ class LMDBWriter(GraphNeTWriter):
             if len(sliced) > 0:
                 event_tables[name] = sliced.reset_index(drop=True)
         return event_tables
-
-    def _build_value_from_tables(
-        self, per_event_tables: Dict[str, pd.DataFrame]
-    ) -> Any:
-        """Build the object to serialize for a single event from tables."""
-        extractor_dict = {
-            name: df.to_dict(orient="list")
-            for name, df in per_event_tables.items()
-        }
-        rep_dict = {}
-        if self._data_representations is not None:
-            if self._pulsemap_name is None or self._truth_name is None:
-                raise ValueError(
-                    "pulsemap_extractor_name and truth_extractor_name must"
-                    "be set when using data_representation."
-                )
-            pulse_df = per_event_tables.get(
-                self._pulsemap_name, pd.DataFrame()
-            )
-            truth_df = per_event_tables.get(self._truth_name, pd.DataFrame())
-            if pulse_df.empty or truth_df.empty:
-                return {
-                    name: df.to_dict(orient="list")
-                    for name, df in per_event_tables.items()
-                }
-
-            # Prepare truth data
-            truth_row = truth_df.iloc[0].to_dict()
-            if self._truth_label_names is not None:
-                truth_row = {
-                    k: truth_row[k]
-                    for k in self._truth_label_names
-                    if k in truth_row
-                }
-            truth_dicts = [truth_row]
-
-            # Process each data representation
-            data_representations_output: Dict[str, Any] = {}
-            class_name_counts: Dict[str, int] = {}
-
-            for data_rep in self._data_representations:
-                # Get feature names for this representation
-                feature_names = getattr(
-                    data_rep, "_input_feature_names", None
-                ) or getattr(data_rep, "input_feature_names", None)
-                if feature_names is None:
-                    feature_names = [
-                        c for c in pulse_df.columns if c != self._index_column
-                    ]
-
-                x = pulse_df[feature_names].to_numpy()
-
-                # Get the output from this data representation
-                rep_output = data_rep.forward(
-                    input_features=x,
-                    input_feature_names=list(feature_names),
-                    truth_dicts=truth_dicts,
-                )  # type: ignore[arg-type]
-
-                # Generate unique key for this representation
-                base_class_name = data_rep.__class__.__name__
-
-                # Track occurrences of each class name
-                if base_class_name not in class_name_counts:
-                    # First occurrence - check if base name is available
-                    if base_class_name in data_representations_output:
-                        # Base name already taken (shouldn't happen), use _0
-                        class_name_counts[base_class_name] = 0
-                        key_name = f"{base_class_name}_0"
-                    else:
-                        # First occurrence - use base name
-                        class_name_counts[base_class_name] = 0
-                        key_name = base_class_name
-                else:
-                    # We've seen this class name before -
-                    # increment and append tag
-                    class_name_counts[base_class_name] += 1
-                    # Break for max line length..
-                    count = class_name_counts[base_class_name]
-                    key_name = f"{base_class_name}_{count}"
-
-                data_representations_output[key_name] = rep_output
-
-            rep_dict = {"data_representations": data_representations_output}
-
-        if len(rep_dict) > 0:
-            extractor_dict.update(rep_dict)
-        return extractor_dict
 
     def _save_file(
         self,
@@ -367,7 +174,15 @@ class LMDBWriter(GraphNeTWriter):
             # Store serialization method metadata
             self._store_serialization_metadata(txn)
             # Store data representation metadata
-            self._store_data_representation_metadata(txn)
+            if self._data_representations is not None:
+                field_name_to_rep = assign_data_representation_field_names(
+                    self._data_representations
+                )
+                write_data_representation_metadata(
+                    txn,
+                    build_data_representation_metadata(field_name_to_rep),
+                    self._serializer,
+                )
 
             is_merged = all(isinstance(v, pd.DataFrame) for v in data.values())
             if is_merged:
@@ -407,7 +222,13 @@ class LMDBWriter(GraphNeTWriter):
             )
             if len(per_event) == 0:
                 continue
-            value_obj = self._build_value_from_tables(per_event)
+            value_obj = build_event_value(
+                per_event_tables=per_event,
+                data_representations=self._data_representations,
+                pulsemap_extractor_name=self._pulsemap_name,
+                truth_extractor_name=self._truth_name,
+                truth_label_names=self._truth_label_names,
+            )
             try:
                 value_bytes = self._serializer(value_obj)
             except Exception as e:
@@ -450,7 +271,13 @@ class LMDBWriter(GraphNeTWriter):
                 per_event_for_lists[name] = df_event.reset_index(drop=True)
             if len(per_event_for_lists) == 0 or event_no_val is None:
                 continue
-            value_obj = self._build_value_from_tables(per_event_for_lists)
+            value_obj = build_event_value(
+                per_event_tables=per_event_for_lists,
+                data_representations=self._data_representations,
+                pulsemap_extractor_name=self._pulsemap_name,
+                truth_extractor_name=self._truth_name,
+                truth_label_names=self._truth_label_names,
+            )
             try:
                 value_bytes = self._serializer(value_obj)
             except Exception as e:
@@ -553,17 +380,12 @@ class LMDBWriter(GraphNeTWriter):
             # Use the serializer that matches the merged database's
             # serialization method
             if data_rep_metadata is not None:
-                try:
-                    merged_serializer = self._resolve_serializer(
-                        serialization_method
-                    )
-                except ValueError:
+                merged_serializer = _resolve_serializer(serialization_method)
+                if merged_serializer is None:
                     # Fall back to writer's serializer for custom methods
                     merged_serializer = self._serializer
-                metadata_key_dr = b"__meta_data_representations__"
-                metadata_value_dr = merged_serializer(data_rep_metadata)
-                target_txn.put(
-                    metadata_key_dr, metadata_value_dr, overwrite=True
+                write_data_representation_metadata(
+                    target_txn, data_rep_metadata, merged_serializer
                 )
 
             for src in files:
