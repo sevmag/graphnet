@@ -447,15 +447,16 @@ class LMDBDataset(Dataset):
         pulsemap_extractor_name: str,
         truth_extractor_name: str,
         truth_label_names: Optional[List[str]] = None,
+        event_nos: Optional[List[int]] = None,
         overwrite: bool = False,
         map_size_bytes: int = 8 * 1024 * 1024 * 1024,
         batch_size: int = 1000,
     ) -> Dict[str, DataRepresentation]:
         """Retroactively add precomputed data representations to an LMDB.
 
-        Walks every event in an already-written LMDB, recomputes the
-        requested `DataRepresentation`(s) from the stored raw extractor
-        tables, and writes them back under
+        Walks every event in an already-written LMDB (or only `event_nos`
+        if given), recomputes the requested `DataRepresentation`(s) from
+        the stored raw extractor tables, and writes them back under
         `value["data_representations"][<field_name>]`. The
         `__meta_data_representations__` metadata is updated so that
         subsequent reads with
@@ -472,6 +473,10 @@ class LMDBDataset(Dataset):
                 truth in the stored value.
             truth_label_names: Optional subset of truth columns to pass to
                 `data_rep.forward(...)`.
+            event_nos: Optional subset of event numbers to process. If None
+                (default), every event in the LMDB is processed. Useful
+                when different event subsets use different
+                `pulsemap_extractor_name` values -- call once per subset.
             overwrite: If False (default), refuse to clobber existing
                 representations whose field name would collide. If True,
                 conflicting names are reused.
@@ -490,6 +495,7 @@ class LMDBDataset(Dataset):
             pulsemap_extractor_name=pulsemap_extractor_name,
             truth_extractor_name=truth_extractor_name,
             truth_label_names=truth_label_names,
+            event_nos=event_nos,
             overwrite=overwrite,
             map_size_bytes=map_size_bytes,
             batch_size=batch_size,
