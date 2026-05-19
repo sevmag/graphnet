@@ -9,6 +9,7 @@ from torch_geometric.data import Data
 from graphnet.data.dataset.dataset import Dataset, ColumnMissingException
 from graphnet.data.utilities.lmdb_utilities import (
     get_all_indices,
+    get_data_representation_from_metadata,
     get_serialization_method,
 )
 from graphnet.training.utils import add_custom_labels, add_truth
@@ -171,7 +172,56 @@ class LMDBDataset(Dataset):
             self._remove_missing_columns()
         if self._pre_computed_representation is not None:
             self._identify_missing_truth_labels()
+            self._assert_stored_representation_matches()
         self._close_connection()
+
+    def _assert_stored_representation_matches(self) -> None:
+        """Cross-check the stored DataRepresentation against the live one.
+
+        When precomputed representations are used, mismatching feature
+        names or detector classes between the LMDB metadata and the
+        live ``data_representation`` lead to silently training on the
+        wrong inputs. Raise early instead.
+        """
+        live = self._data_representation
+        assert isinstance(self._path, str)
+        assert self._pre_computed_representation is not None
+        try:
+            stored = get_data_representation_from_metadata(
+                self._path,
+                field_name=self._pre_computed_representation,
+                trust=True,
+            )
+        except KeyError as e:
+            raise ValueError(
+                f"LMDB {self._path}: precomputed representation field "
+                f"{self._pre_computed_representation!r} not found in "
+                "metadata. Re-convert the LMDB with the matching field "
+                "name, or pass pre_computed_representation=None to read "
+                "raw tables instead."
+            ) from e
+        if stored is None:
+            return
+        live_features = list(getattr(live, "_input_feature_names", []) or [])
+        stored_features = list(
+            getattr(stored, "_input_feature_names", []) or []
+        )
+        if live_features != stored_features:
+            raise ValueError(
+                "DataRepresentation feature_names mismatch between live "
+                f"config and LMDB metadata at {self._path}.\n"
+                f"  live:   {live_features}\n"
+                f"  stored: {stored_features}\n"
+                "Re-convert the LMDB or fix the live config."
+            )
+        live_det = type(getattr(live, "_detector", None)).__name__
+        stored_det = type(getattr(stored, "_detector", None)).__name__
+        if live_det != stored_det:
+            raise ValueError(
+                "DataRepresentation detector mismatch between live config "
+                f"and LMDB metadata at {self._path}: "
+                f"live={live_det}, stored={stored_det}."
+            )
 
     def _identify_missing_truth_labels(self) -> None:
         """Identify missing truth labels in the pre-computed representation."""
