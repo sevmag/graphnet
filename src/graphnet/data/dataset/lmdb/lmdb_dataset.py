@@ -8,10 +8,12 @@ from tqdm import tqdm
 from torch_geometric.data import Data
 from graphnet.data.dataset.dataset import Dataset, ColumnMissingException
 from graphnet.data.utilities.lmdb_utilities import (
+    add_data_representations_to_lmdb,
     get_all_indices,
     get_data_representation_from_metadata,
     get_serialization_method,
 )
+from graphnet.models.data_representation import DataRepresentation
 from graphnet.training.utils import add_custom_labels, add_truth
 
 
@@ -484,3 +486,61 @@ class LMDBDataset(Dataset):
     def close(self) -> None:
         """Close any open LMDB connections."""
         self._close_connection()
+
+    @classmethod
+    def add_data_representations(
+        cls,
+        lmdb_path: str,
+        data_representations: Union[
+            DataRepresentation, List[DataRepresentation]
+        ],
+        pulsemap_extractor_name: str,
+        truth_extractor_name: str,
+        truth_label_names: Optional[List[str]] = None,
+        overwrite: bool = False,
+        map_size_bytes: int = 8 * 1024 * 1024 * 1024,
+        batch_size: int = 1000,
+    ) -> Dict[str, DataRepresentation]:
+        """Retroactively add precomputed data representations to an LMDB.
+
+        Walks every event in an already-written LMDB, recomputes the
+        requested `DataRepresentation`(s) from the stored raw extractor
+        tables, and writes them back under
+        `value["data_representations"][<field_name>]`. The
+        `__meta_data_representations__` metadata is updated so that
+        subsequent reads with
+        `LMDBDataset(..., pre_computed_representation=<field_name>)` and
+        `get_data_representation_from_metadata(...)` find the new entries.
+
+        Args:
+            lmdb_path: Path to an existing LMDB directory.
+            data_representations: One or more `DataRepresentation` instances
+                to compute and store.
+            pulsemap_extractor_name: Name of the extractor providing
+                per-event pulse features in the stored value.
+            truth_extractor_name: Name of the extractor providing event
+                truth in the stored value.
+            truth_label_names: Optional subset of truth columns to pass to
+                `data_rep.forward(...)`.
+            overwrite: If False (default), refuse to clobber existing
+                representations whose field name would collide. If True,
+                conflicting names are reused.
+            map_size_bytes: LMDB map size for the read-write reopen.
+            batch_size: Number of events per write transaction.
+
+        Returns:
+            Mapping from the field names that were written to their
+            corresponding `DataRepresentation` instances. Pass any of these
+            names as `pre_computed_representation` when constructing an
+            `LMDBDataset` to read them back.
+        """
+        return add_data_representations_to_lmdb(
+            lmdb_path=lmdb_path,
+            data_representations=data_representations,
+            pulsemap_extractor_name=pulsemap_extractor_name,
+            truth_extractor_name=truth_extractor_name,
+            truth_label_names=truth_label_names,
+            overwrite=overwrite,
+            map_size_bytes=map_size_bytes,
+            batch_size=batch_size,
+        )

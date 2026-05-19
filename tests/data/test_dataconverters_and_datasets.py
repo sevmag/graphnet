@@ -362,3 +362,89 @@ def test_sqlite_to_lmdb_converter() -> None:
                 else:
                     assert precomputed_truth == realtime_truth
     dataset_from_lmdb_precomputed.close()  # Close connection
+
+
+@pytest.mark.order(4)
+def test_lmdb_retrospective_add_data_representations() -> None:
+    """Test `LMDBDataset.add_data_representations` on an existing LMDB."""
+    from graphnet.data.utilities.lmdb_utilities import (
+        get_data_representation_from_metadata,
+    )
+
+    # Build an LMDB with no precomputed representations.
+    outdir = os.path.join(TEST_OUTPUT_DIR, "lmdb_retrospective")
+    converter = SQLiteToLMDBConverter(
+        extractors=[
+            SQLiteExtractor(extractor_name="truth"),  # type: ignore[abstract]
+            SQLiteExtractor(extractor_name="SRTInIcePulses"),  # type: ignore[abstract]
+        ],
+        outdir=outdir,
+        num_workers=1,
+    )
+    converter(get_file_path("sqlite"))
+    converter.merge_files()
+
+    path = f"{outdir}/merged/merged.lmdb"
+    assert os.path.isdir(path)
+
+    graph_definition = KNNGraph(
+        detector=IceCubeDeepCore(),
+        node_definition=NodesAsPulses(),
+        nb_nearest_neighbours=8,
+        input_feature_names=FEATURES.DEEPCORE,
+    )
+
+    written = LMDBDataset.add_data_representations(
+        lmdb_path=path,
+        data_representations=graph_definition,
+        pulsemap_extractor_name="SRTInIcePulses",
+        truth_extractor_name="truth",
+        truth_label_names=TRUTH.DEEPCORE,
+    )
+    assert list(written.keys()) == [graph_definition.__class__.__name__]
+
+    # Metadata round-trips.
+    field_name = graph_definition.__class__.__name__
+    recovered = get_data_representation_from_metadata(
+        path, field_name, trust=True
+    )
+    assert recovered is not None
+
+    # Reading via pre_computed_representation works and matches SQLite.
+    opt_precomputed = dict(
+        pulsemaps="SRTInIcePulses",
+        features=FEATURES.DEEPCORE,
+        truth=TRUTH.DEEPCORE,
+        pre_computed_representation=field_name,
+    )
+    dataset_precomputed = LMDBDataset(path, **opt_precomputed)  # type: ignore
+    dataset_sqlite = SQLiteDataset(
+        get_file_path("sqlite"),
+        pulsemaps="SRTInIcePulses",
+        features=FEATURES.DEEPCORE,
+        truth=TRUTH.DEEPCORE,
+        graph_definition=graph_definition,
+    )
+    assert len(dataset_precomputed) == len(dataset_sqlite)
+    for ix in range(len(dataset_sqlite)):
+        assert torch.allclose(dataset_precomputed[ix].x, dataset_sqlite[ix].x)
+    dataset_precomputed.close()
+
+    # Second call without overwrite raises; with overwrite it succeeds.
+    with pytest.raises(ValueError):
+        LMDBDataset.add_data_representations(
+            lmdb_path=path,
+            data_representations=graph_definition,
+            pulsemap_extractor_name="SRTInIcePulses",
+            truth_extractor_name="truth",
+            truth_label_names=TRUTH.DEEPCORE,
+        )
+    written_again = LMDBDataset.add_data_representations(
+        lmdb_path=path,
+        data_representations=graph_definition,
+        pulsemap_extractor_name="SRTInIcePulses",
+        truth_extractor_name="truth",
+        truth_label_names=TRUTH.DEEPCORE,
+        overwrite=True,
+    )
+    assert list(written_again.keys()) == [field_name]
