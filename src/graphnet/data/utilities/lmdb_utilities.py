@@ -803,8 +803,17 @@ def _worker_init(
 
 def _worker_compute(
     args: tuple,
-) -> tuple:
-    """Worker payload: run `compute_data_representations_dict` on one event."""
+) -> Tuple[int, bytes]:
+    """Worker payload: run `compute_data_representations_dict` on one event.
+
+    Returns the rep output as `pickle.dumps(...)` bytes rather than the
+    raw dict of `torch_geometric.Data`. This bypasses torch's queue
+    reducers, which would otherwise mmap each tensor to a shared-memory
+    file and exhaust the host's mmap/FD/SHM budget at high
+    `num_workers` * tensors-per-event.
+    """
+    import pickle
+
     index, pulse_dict, truth_dict = args
     try:
         rep_output = compute_data_representations_dict(
@@ -817,7 +826,7 @@ def _worker_compute(
         raise ValueError(
             f"Failed to compute data representation for event {index}: {e}"
         ) from e
-    return index, rep_output
+    return index, pickle.dumps(rep_output)
 
 
 def _process_events_parallel(
@@ -867,18 +876,33 @@ def _process_events_parallel(
         initializer=_worker_init,
         initargs=(field_names, rep_configs, truth_label_names),
     ) as pool:
-        for index, rep_output in tqdm(
-            pool.imap_unordered(_worker_compute, _work_iter(), chunksize=8),
-            total=len(indices),
-            desc=f"Adding {list(field_name_to_rep)} to LMDB",
-            unit="event",
-        ):
-            value = pending.pop(index)
-            value.setdefault("data_representations", {}).update(rep_output)
-            batch_keys.append(str(index).encode("utf-8"))
-            batch_values.append(serializer(value))
-            if len(batch_keys) >= batch_size:
-                _flush_batch(env, batch_keys, batch_values)
-                batch_keys = []
-                batch_values = []
+        import pickle
+
+        results = pool.imap_unordered(
+            _worker_compute, _work_iter(), chunksize=8
+        )
+        try:
+            for index, rep_output_bytes in tqdm(
+                results,
+                total=len(indices),
+                desc=f"Adding {list(field_name_to_rep)} to LMDB",
+                unit="event",
+            ):
+                rep_output = pickle.loads(rep_output_bytes)
+                value = pending.pop(index)
+                value.setdefault("data_representations", {}).update(rep_output)
+                batch_keys.append(str(index).encode("utf-8"))
+                batch_values.append(serializer(value))
+                if len(batch_keys) >= batch_size:
+                    _flush_batch(env, batch_keys, batch_values)
+                    batch_keys = []
+                    batch_values = []
+        except BaseException:
+            # Any worker exception (or main-loop failure) -- kill all
+            # in-flight workers immediately rather than letting them
+            # drain. The exception itself is the one raised by the first
+            # failing imap_unordered result, so re-raise after cleanup.
+            pool.terminate()
+            pool.join()
+            raise
     _flush_batch(env, batch_keys, batch_values)
