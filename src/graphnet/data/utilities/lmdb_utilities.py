@@ -5,8 +5,10 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    Iterator,
     List,
     Optional,
+    Tuple,
     Union,
     TYPE_CHECKING,
 )
@@ -507,6 +509,7 @@ def add_data_representations_to_lmdb(  # noqa: C901
     overwrite: bool = False,
     map_size_bytes: int = 8 * 1024 * 1024 * 1024,
     batch_size: int = 1000,
+    num_workers: int = 1,
 ) -> Dict[str, "DataRepresentation"]:
     """Retroactively add precomputed data representations to an LMDB.
 
@@ -537,6 +540,11 @@ def add_data_representations_to_lmdb(  # noqa: C901
             assigned one. If True, conflicting names are reused.
         map_size_bytes: LMDB map size for the read-write reopen.
         batch_size: Number of events per write transaction.
+        num_workers: Number of worker processes for `data_rep.forward(...)`.
+            1 (default) keeps everything in the main process. With >1,
+            workers compute representations in parallel and the main
+            process serializes writes back to the LMDB (LMDB allows only
+            one writer per env).
 
     Returns:
         Mapping from the field names that were written to their corresponding
@@ -604,69 +612,19 @@ def add_data_representations_to_lmdb(  # noqa: C901
             if event_nos is not None
             else get_all_indices(lmdb_path)
         )
-        iterator = tqdm(
-            indices,
-            desc=f"Adding {list(field_name_to_rep)} to LMDB",
-            unit="event",
+        _process_events(
+            env=env,
+            indices=indices,
+            lmdb_path=lmdb_path,
+            serializer=serializer,
+            deserializer=deserializer,
+            field_name_to_rep=field_name_to_rep,
+            pulsemap_extractor_name=pulsemap_extractor_name,
+            truth_extractor_name=truth_extractor_name,
+            truth_label_names=truth_label_names,
+            batch_size=batch_size,
+            num_workers=num_workers,
         )
-
-        batch_keys: List[bytes] = []
-        batch_values: List[bytes] = []
-
-        def _flush(items_keys: List[bytes], items_values: List[bytes]) -> None:
-            if not items_keys:
-                return
-            with env.begin(write=True) as txn:
-                for k, v in zip(items_keys, items_values):
-                    txn.put(k, v, overwrite=True)
-
-        with env.begin(write=False) as read_txn:
-            for index in iterator:
-                key = str(index).encode("utf-8")
-                value_bytes = read_txn.get(key)
-                if value_bytes is None:
-                    raise KeyError(
-                        f"Event {index} not present in {lmdb_path!r}."
-                    )
-                value = deserializer(value_bytes)
-
-                if pulsemap_extractor_name not in value:
-                    raise KeyError(
-                        f"Event {index} is missing pulsemap extractor "
-                        f"{pulsemap_extractor_name!r}."
-                    )
-                if truth_extractor_name not in value:
-                    raise KeyError(
-                        f"Event {index} is missing truth extractor "
-                        f"{truth_extractor_name!r}."
-                    )
-                pulse_df = pd.DataFrame(value[pulsemap_extractor_name])
-                truth_df = pd.DataFrame(value[truth_extractor_name])
-
-                try:
-                    rep_output = compute_data_representations_dict(
-                        pulse_df=pulse_df,
-                        truth_df=truth_df,
-                        field_name_to_rep=field_name_to_rep,
-                        truth_label_names=truth_label_names,
-                    )
-                except ValueError as e:
-                    raise ValueError(
-                        f"Failed to compute data representation for event "
-                        f"{index}: {e}"
-                    ) from e
-
-                reps = value.setdefault("data_representations", {})
-                reps.update(rep_output)
-
-                batch_keys.append(key)
-                batch_values.append(serializer(value))
-                if len(batch_keys) >= batch_size:
-                    _flush(batch_keys, batch_values)
-                    batch_keys = []
-                    batch_values = []
-
-        _flush(batch_keys, batch_values)
 
         merged_metadata = dict(existing_metadata)
         merged_metadata.update(
@@ -682,3 +640,245 @@ def add_data_representations_to_lmdb(  # noqa: C901
         env.close()
 
     return field_name_to_rep
+
+
+def _read_event_value(
+    env: lmdb.Environment,
+    index: int,
+    lmdb_path: str,
+    deserializer: Callable[[bytes], Any],
+    pulsemap_extractor_name: str,
+    truth_extractor_name: str,
+) -> Dict[str, Any]:
+    """Read+deserialize a single event and validate required extractors."""
+    key = str(index).encode("utf-8")
+    with env.begin(write=False) as txn:
+        value_bytes = txn.get(key)
+    if value_bytes is None:
+        raise KeyError(f"Event {index} not present in {lmdb_path!r}.")
+    value = deserializer(value_bytes)
+
+    if pulsemap_extractor_name not in value:
+        raise KeyError(
+            f"Event {index} is missing pulsemap extractor "
+            f"{pulsemap_extractor_name!r}. Available top-level keys for "
+            f"this event: {sorted(value.keys())}."
+        )
+    if truth_extractor_name not in value:
+        raise KeyError(
+            f"Event {index} is missing truth extractor "
+            f"{truth_extractor_name!r}. Available top-level keys for "
+            f"this event: {sorted(value.keys())}."
+        )
+    return value
+
+
+def _flush_batch(
+    env: lmdb.Environment,
+    keys: List[bytes],
+    values: List[bytes],
+) -> None:
+    """Write a batch of (key, value) pairs in a single write txn."""
+    if not keys:
+        return
+    with env.begin(write=True) as txn:
+        for k, v in zip(keys, values):
+            txn.put(k, v, overwrite=True)
+
+
+def _process_events(
+    env: lmdb.Environment,
+    indices: List[int],
+    lmdb_path: str,
+    serializer: Callable[[Any], bytes],
+    deserializer: Callable[[bytes], Any],
+    field_name_to_rep: Dict[str, "DataRepresentation"],
+    pulsemap_extractor_name: str,
+    truth_extractor_name: str,
+    truth_label_names: Optional[List[str]],
+    batch_size: int,
+    num_workers: int,
+) -> None:
+    """Iterate `indices`, compute reps, and write merged values back."""
+    if num_workers <= 1:
+        _process_events_serial(
+            env=env,
+            indices=indices,
+            lmdb_path=lmdb_path,
+            serializer=serializer,
+            deserializer=deserializer,
+            field_name_to_rep=field_name_to_rep,
+            pulsemap_extractor_name=pulsemap_extractor_name,
+            truth_extractor_name=truth_extractor_name,
+            truth_label_names=truth_label_names,
+            batch_size=batch_size,
+        )
+    else:
+        _process_events_parallel(
+            env=env,
+            indices=indices,
+            lmdb_path=lmdb_path,
+            serializer=serializer,
+            deserializer=deserializer,
+            field_name_to_rep=field_name_to_rep,
+            pulsemap_extractor_name=pulsemap_extractor_name,
+            truth_extractor_name=truth_extractor_name,
+            truth_label_names=truth_label_names,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )
+
+
+def _process_events_serial(
+    env: lmdb.Environment,
+    indices: List[int],
+    lmdb_path: str,
+    serializer: Callable[[Any], bytes],
+    deserializer: Callable[[bytes], Any],
+    field_name_to_rep: Dict[str, "DataRepresentation"],
+    pulsemap_extractor_name: str,
+    truth_extractor_name: str,
+    truth_label_names: Optional[List[str]],
+    batch_size: int,
+) -> None:
+    """Single-process loop: read, compute, batch-write."""
+    batch_keys: List[bytes] = []
+    batch_values: List[bytes] = []
+    for index in tqdm(
+        indices,
+        desc=f"Adding {list(field_name_to_rep)} to LMDB",
+        unit="event",
+    ):
+        value = _read_event_value(
+            env=env,
+            index=index,
+            lmdb_path=lmdb_path,
+            deserializer=deserializer,
+            pulsemap_extractor_name=pulsemap_extractor_name,
+            truth_extractor_name=truth_extractor_name,
+        )
+        try:
+            rep_output = compute_data_representations_dict(
+                pulse_df=pd.DataFrame(value[pulsemap_extractor_name]),
+                truth_df=pd.DataFrame(value[truth_extractor_name]),
+                field_name_to_rep=field_name_to_rep,
+                truth_label_names=truth_label_names,
+            )
+        except ValueError as e:
+            raise ValueError(
+                f"Failed to compute data representation for event "
+                f"{index}: {e}"
+            ) from e
+
+        value.setdefault("data_representations", {}).update(rep_output)
+        batch_keys.append(str(index).encode("utf-8"))
+        batch_values.append(serializer(value))
+        if len(batch_keys) >= batch_size:
+            _flush_batch(env, batch_keys, batch_values)
+            batch_keys = []
+            batch_values = []
+    _flush_batch(env, batch_keys, batch_values)
+
+
+# Worker globals -- populated by `_worker_init` in each Pool worker.
+_WORKER_FIELD_NAME_TO_REP: Dict[str, Any] = {}
+_WORKER_TRUTH_LABELS: Optional[List[str]] = None
+
+
+def _worker_init(
+    field_names: List[str],
+    rep_configs: List[Any],
+    truth_label_names: Optional[List[str]],
+) -> None:
+    """Pool initializer: rebuild reps from their configs once per worker."""
+    from graphnet.models.data_representation import DataRepresentation
+
+    global _WORKER_FIELD_NAME_TO_REP, _WORKER_TRUTH_LABELS
+    _WORKER_FIELD_NAME_TO_REP = {
+        name: DataRepresentation.from_config(cfg, trust=True)
+        for name, cfg in zip(field_names, rep_configs)
+    }
+    _WORKER_TRUTH_LABELS = truth_label_names
+
+
+def _worker_compute(
+    args: tuple,
+) -> tuple:
+    """Worker payload: run `compute_data_representations_dict` on one event."""
+    index, pulse_dict, truth_dict = args
+    try:
+        rep_output = compute_data_representations_dict(
+            pulse_df=pd.DataFrame(pulse_dict),
+            truth_df=pd.DataFrame(truth_dict),
+            field_name_to_rep=_WORKER_FIELD_NAME_TO_REP,
+            truth_label_names=_WORKER_TRUTH_LABELS,
+        )
+    except ValueError as e:
+        raise ValueError(
+            f"Failed to compute data representation for event {index}: {e}"
+        ) from e
+    return index, rep_output
+
+
+def _process_events_parallel(
+    env: lmdb.Environment,
+    indices: List[int],
+    lmdb_path: str,
+    serializer: Callable[[Any], bytes],
+    deserializer: Callable[[bytes], Any],
+    field_name_to_rep: Dict[str, "DataRepresentation"],
+    pulsemap_extractor_name: str,
+    truth_extractor_name: str,
+    truth_label_names: Optional[List[str]],
+    batch_size: int,
+    num_workers: int,
+) -> None:
+    """Compute reps in a Pool, write back from the main process."""
+    import multiprocessing as mp
+
+    field_names = list(field_name_to_rep.keys())
+    rep_configs = [field_name_to_rep[name].config for name in field_names]
+
+    # Per-event deserialized values; popped when the worker returns.
+    pending: Dict[int, Dict[str, Any]] = {}
+
+    def _work_iter() -> Iterator[Tuple[int, Dict[str, Any], Dict[str, Any]]]:
+        for index in indices:
+            value = _read_event_value(
+                env=env,
+                index=index,
+                lmdb_path=lmdb_path,
+                deserializer=deserializer,
+                pulsemap_extractor_name=pulsemap_extractor_name,
+                truth_extractor_name=truth_extractor_name,
+            )
+            pending[index] = value
+            yield (
+                index,
+                value[pulsemap_extractor_name],
+                value[truth_extractor_name],
+            )
+
+    batch_keys: List[bytes] = []
+    batch_values: List[bytes] = []
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(
+        processes=num_workers,
+        initializer=_worker_init,
+        initargs=(field_names, rep_configs, truth_label_names),
+    ) as pool:
+        for index, rep_output in tqdm(
+            pool.imap_unordered(_worker_compute, _work_iter(), chunksize=8),
+            total=len(indices),
+            desc=f"Adding {list(field_name_to_rep)} to LMDB",
+            unit="event",
+        ):
+            value = pending.pop(index)
+            value.setdefault("data_representations", {}).update(rep_output)
+            batch_keys.append(str(index).encode("utf-8"))
+            batch_values.append(serializer(value))
+            if len(batch_keys) >= batch_size:
+                _flush_batch(env, batch_keys, batch_values)
+                batch_keys = []
+                batch_values = []
+    _flush_batch(env, batch_keys, batch_values)

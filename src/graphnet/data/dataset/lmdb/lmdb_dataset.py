@@ -501,6 +501,7 @@ class LMDBDataset(Dataset):
         overwrite: bool = False,
         map_size_bytes: int = 8 * 1024 * 1024 * 1024,
         batch_size: int = 1000,
+        num_workers: int = 1,
     ) -> Dict[str, DataRepresentation]:
         """Retroactively add precomputed data representations to an LMDB.
 
@@ -532,6 +533,10 @@ class LMDBDataset(Dataset):
                 conflicting names are reused.
             map_size_bytes: LMDB map size for the read-write reopen.
             batch_size: Number of events per write transaction.
+            num_workers: Worker processes for `data_rep.forward(...)`. 1
+                (default) runs everything in the main process; with >1,
+                workers compute representations in parallel and the main
+                process serializes writes (LMDB allows one writer per env).
 
         Returns:
             Mapping from the field names that were written to their
@@ -549,4 +554,5 @@ class LMDBDataset(Dataset):
             overwrite=overwrite,
             map_size_bytes=map_size_bytes,
             batch_size=batch_size,
+            num_workers=num_workers,
         )
