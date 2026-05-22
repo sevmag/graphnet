@@ -137,6 +137,31 @@ class DirectionReconstructionWithIAG(StandardLearnedTask):
         return x
 
 
+class DirectionReconstructionWithVMFDD(StandardLearnedTask):
+    """Reconstructs direction with the coupled vMF parametrisation.
+
+    Pairs with `VonMisesFisher3DLossDD`. The 3 outputs are the raw mean
+    vector ``mu`` from which the loss derives both the unit direction
+    (``mu / ||mu||``) and the concentration (``kappa = ||mu||``).
+
+    Contrast with `DirectionReconstructionWithKappa`, which exposes the
+    unit direction and ``kappa`` as separate channels and pairs with the
+    Bessel-based `VonMisesFisher3DLoss`.
+    """
+
+    default_target_labels = ["direction"]  # dir_x, dir_y, dir_z
+    default_prediction_labels = [
+        "dir_x_pred",
+        "dir_y_pred",
+        "dir_z_pred",
+    ]
+    nb_inputs = 3
+
+    def _forward(self, x: Tensor) -> Tensor:
+        # vMF (dirdist) expects the raw mean vector: pass through as-is.
+        return x
+
+
 class ZenithReconstruction(StandardLearnedTask):
     """Reconstructs zenith angle."""
 
