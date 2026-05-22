@@ -66,12 +66,17 @@ class DynEdgeConv(EdgeConv, LightningModule):
         # Standard EdgeConv forward pass
         x = super().forward(x, edge_index)
 
-        # Recompute adjacency
-        edge_index = knn_graph(
-            x=x[:, self.features_subset],
-            k=self.nb_neighbors,
-            batch=batch,
-        ).to(self.device)
+        # Recompute the edges
+        # _graph has no stable 16-bit kernel: under bf16/fp16 autocast
+        # latent-space distances are too coarse and neighbour selection
+        # becomes noisy / NaN-prone. Run it in fp32; edge_index is int64 so
+        # only the internal distance computation is affected.
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            edge_index = knn_graph(
+                x=x[:, self.features_subset].float(),
+                k=self.nb_neighbors,
+                batch=batch,
+            ).to(self.device)
 
         return x, edge_index
 
