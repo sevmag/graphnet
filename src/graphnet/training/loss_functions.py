@@ -22,6 +22,7 @@ from directional_distributions import (
     iag_nll_loss,
     esag_nll_loss,
     gag_nll_loss,
+    von_mises_fisher_loss,
 )
 
 from graphnet.models.model import Model
@@ -669,6 +670,30 @@ class GeneralAngularGaussianLoss(_DirectionalDistributionLoss):
 
     _n_params = 9
     _loss_fn = staticmethod(gag_nll_loss)
+
+
+class VonMisesFisher3DLossDD(_DirectionalDistributionLoss):
+    """3D von Mises-Fisher NLL backed by `directional_distributions`.
+
+    Alternative to `VonMisesFisher3DLoss`. The two losses differ in:
+
+    * Parametrisation: this loss takes a single 3-vector mu per event;
+      direction is ``mu / ||mu||`` and ``kappa = ||mu||``. The graphnet
+      variant takes 4 numbers (direction, kappa) as independent outputs.
+    * Normalisation: this loss uses the closed-form
+      ``log C_3(kappa) = log(kappa / (2 sinh kappa))``, while the graphnet
+      variant approximates ``log C_3`` via Bessel functions (`LogCMK`) and
+      switches to an asymptotic form above kappa ~= 100.
+
+    Up to the additive constant ``log(2 pi)`` (which only affects the loss
+    value, not the gradient) the two losses are mathematically equivalent;
+    use this class to probe behaviour at large kappa.
+
+    Prediction shape [N, 3]; target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 3
+    _loss_fn = staticmethod(von_mises_fisher_loss)
 
 
 class NegCosLoss(LossFunction):
