@@ -261,14 +261,19 @@ class cluster_and_pad:
             .astype(int)
         )
 
-        self._padded_x = np.empty(
-            (len(self._counts), max(self._counts), x.shape[1])
+        n_clusters = len(self._counts)
+        self._padded_x = np.full(
+            (n_clusters, int(self._counts.max()), x.shape[1]),
+            np.nan,
         )
-        self._padded_x.fill(np.nan)
-
-        for i in range(len(self._counts)):
-            self._padded_x[i, : self._counts[i]] = x[: self._counts[i]]
-            x = x[self._counts[i] :]
+        # After the two lex_sort calls above, `x` is contiguous per cluster
+        # in the same order as `self._counts`. Scatter every pulse to its
+        # (cluster_idx, pos_within_cluster) slot in one shot rather than
+        # iterating clusters in Python.
+        cluster_idx = np.repeat(np.arange(n_clusters), self._counts)
+        starts = np.concatenate(([0], np.cumsum(self._counts[:-1])))
+        pos_within = np.arange(len(x)) - np.repeat(starts, self._counts)
+        self._padded_x[cluster_idx, pos_within] = x
 
         self._input_names = input_names
         if self._input_names is not None:
@@ -440,7 +445,8 @@ class cluster_and_pad:
             summarization_indices: List of column indices that defines features
                                     that will be summarized with percentiles.
             percentiles: percentiles used to summarize `x`. E.g. [10,50,90].
-            method: Method to summarize the features. E.g. "linear"
+            method: Interpolation method. Only ``"linear"`` is supported;
+                other modes raise ``NotImplementedError``.
             location: Location to insert the summarization indices in the
                        clustered tensor defaults to adding at the end
         Altered:
@@ -449,14 +455,37 @@ class cluster_and_pad:
             _cluster_names: The names are added at the end of the tensor
                             or inserted at the specified location
         """
-        percentiles_x = np.nanpercentile(
-            self._padded_x[:, :, summarization_indices],
-            percentiles,
-            axis=1,
-            method=method,
-        )
-
-        percentiles_x = percentiles_x.transpose(1, 2, 0).reshape(
+        if method != "linear":
+            raise NotImplementedError(
+                "add_percentile_summary only supports method='linear'; "
+                f"got {method!r}"
+            )
+        # Vectorise the percentile pass: `np.nanpercentile(..., axis=1)`
+        # falls back to `apply_along_axis` over (n_clusters * F) 1-D rows
+        # in Python -- ~500 dispatches per typical event plus per-row
+        # `_remove_nan_1d`. We get the same `method="linear"` result via a
+        # single `np.sort(axis=1)` + two fancy-index gathers + a lerp. The
+        # NaN-padded slots in `_padded_x` sort to the end, and the gather
+        # indices are bounded by counts-1, so they're never read.
+        sub = self._padded_x[:, :, summarization_indices]
+        sorted_sub = np.sort(sub, axis=1)
+        n_clusters = sorted_sub.shape[0]
+        counts_minus_1_f = (self._counts - 1).astype(np.float64)
+        counts_minus_1_i = (self._counts - 1).astype(np.intp)
+        p = np.asarray(percentiles, dtype=np.float64) / 100.0
+        pos = counts_minus_1_f[:, None] * p[None, :]
+        lo = np.floor(pos).astype(np.intp)
+        hi = np.minimum(lo + 1, counts_minus_1_i[:, None])
+        frac = pos - lo
+        rows = np.arange(n_clusters)[:, None]
+        vals_lo = sorted_sub[rows, lo, :]
+        vals_hi = sorted_sub[rows, hi, :]
+        percentiles_x = vals_lo + (vals_hi - vals_lo) * frac[:, :, None]
+        # (n_clusters, P, F) -> (n_clusters, F*P) with column ordering
+        # (feat0_p0, feat0_p1, ..., feat1_p0, ...) -- match the legacy
+        # `np.nanpercentile(..., axis=1).transpose(1, 2, 0).reshape(...)`
+        # layout exactly.
+        percentiles_x = percentiles_x.transpose(0, 2, 1).reshape(
             len(self.clustered_x), -1
         )
         self._add_column(percentiles_x, location)
