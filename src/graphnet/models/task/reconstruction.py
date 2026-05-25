@@ -108,6 +108,35 @@ class DirectionReconstructionWithGAG(StandardLearnedTask):
         return x
 
 
+class DirectionReconstructionWithIAG(StandardLearnedTask):
+    """Reconstructs direction parameterised by the Isotropic Angular Gaussian.
+
+    Pairs with `IsotropicAngularGaussianLoss`. The 3 outputs are the raw
+    parameters the loss expects:
+
+    * cols 0..2 (`dir_x_pred`, `dir_y_pred`, `dir_z_pred`): unnormalised
+      mean vector ``mu``. The unit mean direction on the sphere is
+      ``mu / ||mu||``; the magnitude ``||mu||`` sets the (isotropic)
+      concentration, so -- unlike vMF -- there is no separate kappa output.
+
+    See ``directional_distributions.ag.iag_nll_loss`` for the full
+    parameterisation.
+    """
+
+    # Target is the same compound `direction` label as vMF / GAG.
+    default_target_labels = ["direction"]  # dir_x, dir_y, dir_z
+    default_prediction_labels = [
+        "dir_x_pred",
+        "dir_y_pred",
+        "dir_z_pred",
+    ]
+    nb_inputs = 3
+
+    def _forward(self, x: Tensor) -> Tensor:
+        # IAG expects the raw, unconstrained mean vector: pass through as-is.
+        return x
+
+
 class ZenithReconstruction(StandardLearnedTask):
     """Reconstructs zenith angle."""
 
