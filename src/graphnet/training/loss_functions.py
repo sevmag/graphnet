@@ -24,6 +24,11 @@ from directional_distributions import (
     gag_nll_loss,
     von_mises_fisher_loss,
 )
+from directional_distributions import (
+    iag_nll_loss,
+    esag_nll_loss,
+    gag_nll_loss,
+)
 
 from graphnet.models.model import Model
 from graphnet.utilities.decorators import final
