@@ -686,6 +686,7 @@ class _DirectionalDistributionLoss(LossFunction):
         return _LOSS_PRECISION_DTYPES[key]
 
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        target = target.reshape(-1, 3).to(prediction.dtype)
         assert prediction.dim() == 2 and prediction.size(1) == self._n_params
         dtype = self._loss_dtype()
         if dtype is not None:
