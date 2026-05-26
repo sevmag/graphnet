@@ -695,7 +695,6 @@ class VonMisesFisher3DLossDD(_DirectionalDistributionLoss):
     _n_params = 3
     _loss_fn = staticmethod(von_mises_fisher_loss)
 
-
 class NegCosLoss(LossFunction):
     """Negative Cosine error loss."""
 
@@ -711,3 +710,56 @@ class NegCosLoss(LossFunction):
         orig_norm = torch.nn.functional.normalize(target, dim=1)
         elements = -(reco_norm * orig_norm).sum(dim=1)
         return elements
+
+
+################ Experimental losses ########################
+
+import torch.nn.functional as F
+
+from directional_distributions._base import _apply_reduction
+
+
+def von_mises_fisher_loss_squared_kappa(
+    n_pred: Tensor,
+    n_true: Tensor,
+    kappa_reg: float = 0.0,
+    eps: float = 1e-8,
+    reduction: str = "mean",
+) -> Tensor:
+    """
+    von Mises-Fisher loss with coupled direction and κ.
+
+    Expects n_pred [B,3]: direction = normalize(n_pred), κ = ||n_pred||.
+
+    Args:
+        reduction: ``"mean"`` (default), ``"sum"``, or ``"none"``.
+    """
+    direction = F.normalize(n_pred, p=2, dim=1)
+    kappa = n_pred.norm(p=2, dim=1)**2
+    cos_sim = (direction * n_true).sum(dim=1)
+    log_C = -kappa + torch.log((kappa + eps) / (1 - torch.exp(-2 * kappa) + 2 * eps))
+    nll = -(kappa * cos_sim + log_C) + kappa_reg * kappa
+    return _apply_reduction(nll, reduction)
+
+class VonMisesFisher3DLossDDsquaredKappa(_DirectionalDistributionLoss):
+    """3D von Mises-Fisher NLL backed by `directional_distributions`.
+
+    Alternative to `VonMisesFisher3DLoss`. The two losses differ in:
+
+    * Parametrisation: this loss takes a single 3-vector mu per event;
+      direction is ``mu / ||mu||`` and ``kappa = ||mu||``. The graphnet
+      variant takes 4 numbers (direction, kappa) as independent outputs.
+    * Normalisation: this loss uses the closed-form
+      ``log C_3(kappa) = log(kappa / (2 sinh kappa))``, while the graphnet
+      variant approximates ``log C_3`` via Bessel functions (`LogCMK`) and
+      switches to an asymptotic form above kappa ~= 100.
+
+    Up to the additive constant ``log(2 pi)`` (which only affects the loss
+    value, not the gradient) the two losses are mathematically equivalent;
+    use this class to probe behaviour at large kappa.
+
+    Prediction shape [N, 3]; target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 3
+    _loss_fn = staticmethod(von_mises_fisher_loss_squared_kappa)
