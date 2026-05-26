@@ -28,6 +28,9 @@ from directional_distributions import (
 from graphnet.models.model import Model
 from graphnet.utilities.decorators import final
 
+import torch.nn.functional as F
+from directional_distributions._base import _apply_reduction
+
 
 class LossFunction(Model):
     """Base class for loss functions in `graphnet`."""
@@ -695,6 +698,7 @@ class VonMisesFisher3DLossDD(_DirectionalDistributionLoss):
     _n_params = 3
     _loss_fn = staticmethod(von_mises_fisher_loss)
 
+
 class NegCosLoss(LossFunction):
     """Negative Cosine error loss."""
 
@@ -714,32 +718,34 @@ class NegCosLoss(LossFunction):
 
 ################ Experimental losses ########################
 
-import torch.nn.functional as F
 
-from directional_distributions._base import _apply_reduction
-
-
-def von_mises_fisher_loss_squared_kappa(
+def _von_mises_fisher_loss_squared_kappa(
     n_pred: Tensor,
     n_true: Tensor,
     kappa_reg: float = 0.0,
     eps: float = 1e-8,
     reduction: str = "mean",
 ) -> Tensor:
-    """
-    von Mises-Fisher loss with coupled direction and κ.
+    """Von Mises-Fisher loss with coupled direction and κ.
 
     Expects n_pred [B,3]: direction = normalize(n_pred), κ = ||n_pred||.
 
     Args:
+        n_pred: Predicted direction. Shape [B,3].
+        n_true: True direction. Shape [B,3].
+        kappa_reg: Regularisation term for κ.
+        eps: Small constant to avoid division by zero.
         reduction: ``"mean"`` (default), ``"sum"``, or ``"none"``.
     """
     direction = F.normalize(n_pred, p=2, dim=1)
-    kappa = n_pred.norm(p=2, dim=1)**2
+    kappa = n_pred.norm(p=2, dim=1) ** 2
     cos_sim = (direction * n_true).sum(dim=1)
-    log_C = -kappa + torch.log((kappa + eps) / (1 - torch.exp(-2 * kappa) + 2 * eps))
+    log_C = -kappa + torch.log(
+        (kappa + eps) / (1 - torch.exp(-2 * kappa) + 2 * eps)
+    )
     nll = -(kappa * cos_sim + log_C) + kappa_reg * kappa
     return _apply_reduction(nll, reduction)
+
 
 class VonMisesFisher3DLossDDsquaredKappa(_DirectionalDistributionLoss):
     """3D von Mises-Fisher NLL backed by `directional_distributions`.
@@ -762,4 +768,4 @@ class VonMisesFisher3DLossDDsquaredKappa(_DirectionalDistributionLoss):
     """
 
     _n_params = 3
-    _loss_fn = staticmethod(von_mises_fisher_loss_squared_kappa)
+    _loss_fn = staticmethod(_von_mises_fisher_loss_squared_kappa)
