@@ -4,8 +4,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple, Type, Union
 import os
+import time
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from graphnet.data import ERDAHostedDataset
 from graphnet.data.dataset import Dataset, EnsembleDataset
@@ -20,6 +22,53 @@ from graphnet.models.detector.nubench import (
     Triangle,
 )
 from graphnet.training.labels import Direction, Track
+
+
+def _read_file_fully(path: str) -> bytes:
+    """Read all bytes of ``path`` via raw ``os.read`` to the stat'd size.
+
+    Inside the GPU training process, higher-level reads (pandas/pyarrow, and
+    even buffered ``open().read()``) of a small selection parquet on the
+    network filesystem can return short -- yielding a truncated buffer with no
+    ``PAR1`` footer ("Parquet magic bytes not found"). This loops on raw
+    ``os.read`` until the file's fstat size is reached.
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        size = os.fstat(fd).st_size
+        chunks = []
+        got = 0
+        while got < size:
+            chunk = os.read(fd, size - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _read_event_nos(path: str) -> List[int]:
+    """Read the ``event_no`` column from a selection parquet robustly.
+
+    Reads the whole file into memory (raw ``os.read`` to the stat size) and
+    parses from a buffer, retrying on a short read that lacks the ``PAR1``
+    footer. This guards against an occasional truncated read of a small
+    selection file on a network filesystem; a hard, persistent failure (e.g. a
+    dead Lustre OST for that file's stripe) still raises after the retries.
+    """
+    last_err = ""
+    for attempt in range(5):
+        data = _read_file_fully(path)
+        if data[-4:] == b"PAR1":
+            table = pq.read_table(pa.BufferReader(data), columns=["event_no"])
+            return table.column("event_no").to_pylist()
+        last_err = f"short read ({len(data)} bytes, no PAR1 footer)"
+        if attempt < 4:
+            time.sleep(0.5)
+    raise OSError(f"Could not fully read {path}: {last_err}")
+
 
 FEATURES_NUBENCH = [
     "sensor_pos_x",
@@ -184,6 +233,39 @@ class NuBenchDataset(ERDAHostedDataset):
                 "energies in the 10 GeV - 100 TeV range. "
                 "Train/test split provided by NuBench selection files."
             ),
+        ),
+        # Locally-converted Prometheus sample on the IceCube/Hexagon geometry
+        # (felixyu all_sky_prometheus_icgeo_gen). Same 5160-module geometry as
+        # `hexagon`, so it reuses the Hexagon detector. Photons are merged into
+        # pulses at conversion time (3.2 ns TTS window; charge = photon count,
+        # t = mean arrival), with the NuBench >=4-pulse cut; a single `photons`
+        # pulsemap serves all splits. Not ERDA-hosted: the LMDB and selection
+        # files must already exist under download_dir/<name>/.
+        "icecube86_icgeo": NuBenchSpec(
+            erda_hash="LOCAL_NO_ERDA",
+            detector_cls=Hexagon,
+            experiment="IceCube/Hexagon all-sky (Prometheus, local)",
+            comments=(
+                "Locally-converted all-sky Prometheus generation on the "
+                "IceCube hexagon geometry. Photons merged to pulses "
+                "(3.2 ns window, charge = photon count), single `photons` "
+                "pulsemap."
+            ),
+            event_truth=[
+                "interaction",
+                "initial_state_energy",
+                "initial_state_type",
+                "initial_state_zenith",
+                "initial_state_azimuth",
+                "initial_state_x",
+                "initial_state_y",
+                "initial_state_z",
+            ],
+            pulsemap_per_split={
+                "train": "photons",
+                "val": "photons",
+                "test": "photons",
+            },
         ),
     }
 
@@ -367,16 +449,16 @@ class NuBenchDataset(ERDAHostedDataset):
             db_path = os.path.join(self.dataset_dir, self._spec.lmdb_relpath)
         else:
             db_path = os.path.join(self.dataset_dir, self._spec.db_relpath)
-        default_train_sel = pd.read_parquet(
+        default_train_sel = _read_event_nos(
             os.path.join(
                 self.dataset_dir, self._spec.selection_relpaths["train"]
             )
-        )["event_no"].tolist()
-        test_sel = pd.read_parquet(
+        )
+        test_sel = _read_event_nos(
             os.path.join(
                 self.dataset_dir, self._spec.selection_relpaths["test"]
             )
-        )["event_no"].tolist()
+        )
 
         train_sel = default_train_sel
         if self._custom_train_selection is not None:
