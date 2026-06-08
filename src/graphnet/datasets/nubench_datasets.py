@@ -1,5 +1,6 @@
 """Curated datasets from the NuBench benchmark suite (arXiv:2511.13111)."""
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple, Type, Union
 import os
@@ -194,6 +195,7 @@ class NuBenchDataset(ERDAHostedDataset):
         data_representation: DataRepresentation,
         train_selection: Optional[List[int]] = None,
         test_selection: Optional[List[int]] = None,
+        disable_test_perturbation: bool = True,
         **kwargs: Any,
     ) -> None:
         """Construct a NuBench dataset by registry name.
@@ -211,6 +213,12 @@ class NuBenchDataset(ERDAHostedDataset):
             test_selection: Optional list of ``event_no`` to use for
                 the test split, overriding the default selection file.
                 Must be a subset of the default test selection.
+            disable_test_perturbation: If True (default), the test split is
+                built from a perturbation-free copy of
+                ``data_representation`` so its already-smeared
+                ``pulses_no_noise`` events are not perturbed a second time.
+                Set to False to keep applying ``data_representation``'s
+                ``perturbation_dict`` to the test split as well.
             **kwargs: Forwarded to :class:`ERDAHostedDataset`.
         """
         if name not in self._registry:
@@ -246,6 +254,19 @@ class NuBenchDataset(ERDAHostedDataset):
             data_representation=data_representation,
             backend="sqlite",
             **kwargs,
+        )
+
+        # Test events live in the `pulses_no_noise` pulsemap, whose charge
+        # and time already carry NuBench's pulse smearing (std 0.25 p.e. and
+        # 1 ns; arXiv:2511.13111). By default a perturbation-free twin lets
+        # `_create_dataset` build the test split without re-applying that
+        # smearing, while train/val keep the configured perturbation that
+        # emulates it on the raw `merged_photons` hits. With the flag off the
+        # test split shares the perturbing representation.
+        self._test_data_representation = (
+            self._without_perturbation(data_representation)
+            if disable_test_perturbation
+            else data_representation
         )
 
     @classmethod
@@ -338,6 +359,24 @@ class NuBenchDataset(ERDAHostedDataset):
             )
         return list(custom)
 
+    @staticmethod
+    def _without_perturbation(
+        data_representation: DataRepresentation,
+    ) -> DataRepresentation:
+        """Return a representation that never perturbs its inputs.
+
+        A representation with no ``perturbation_dict`` is returned unchanged;
+        otherwise a deep copy with perturbation disabled is returned so the
+        original (used for the train/val splits) keeps perturbing.
+        """
+        if not isinstance(
+            getattr(data_representation, "_perturbation_dict", None), dict
+        ):
+            return data_representation
+        unperturbed = deepcopy(data_representation)
+        unperturbed._perturbation_dict = None
+        return unperturbed
+
     def _create_dataset(
         self,
         selection: Union[List[int], List[List[int]], List[float]],
@@ -351,4 +390,11 @@ class NuBenchDataset(ERDAHostedDataset):
         else:
             key = "train"
         self._dataset_args["pulsemaps"] = [pmap[key]]
+        # The test split's pulses are already smeared, so build it from the
+        # perturbation-free twin; train/val keep the perturbing original.
+        self._dataset_args["data_representation"] = (
+            self._test_data_representation
+            if key == "test"
+            else self._data_representation
+        )
         return super()._create_dataset(selection)
