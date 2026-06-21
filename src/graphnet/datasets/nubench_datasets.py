@@ -105,6 +105,13 @@ _DEFAULT_PULSEMAPS = {
     "test": "pulses_no_noise",
 }
 
+# Train (`merged_photons`) holds raw integer photon counts and raw hit times;
+# test (`pulses_no_noise`) carries a per-pulse Gaussian smearing of 0.25 p.e.
+# on charge and 1 ns on time (arXiv:2511.13111, Eq. B.1-B.2). As a
+# `perturbation_dict` these stds smear the raw train/val hits so both splits
+# share a distribution.
+_SMEAR_PERTURBATION: Dict[str, float] = {"charge": 0.25, "t": 1.0}
+
 
 @dataclass(frozen=True)
 class NuBenchSpec:
@@ -319,7 +326,6 @@ class NuBenchDataset(ERDAHostedDataset):
         test_selection: Optional[List[int]] = None,
         backend: str = "sqlite",
         pre_computed_representation: Optional[str] = "GraphDefinition",
-        disable_test_perturbation: bool = True,
         **kwargs: Any,
     ) -> None:
         """Construct a NuBench dataset by registry name.
@@ -337,10 +343,14 @@ class NuBenchDataset(ERDAHostedDataset):
             test_selection: Optional list of ``event_no`` to use for the
                 test split. Must be a subset of either the default train
                 selection or the default test selection; the matching
-                pulsemap is used automatically -- a subset of the train
-                selection is served from the train (``merged_photons``)
-                pulsemap, a subset of the test selection from the
-                ``pulses_no_noise`` pulsemap. A selection spanning both (or
+                pulsemap and perturbation are used automatically. A subset of
+                the train selection is served raw from the train
+                (``merged_photons``) pulsemap and is smeared by
+                ``data_representation``'s ``perturbation_dict`` like train/val.
+                A subset of the test selection is served from the
+                ``pulses_no_noise`` pulsemap, whose charge and time already
+                carry NuBench's 0.25 p.e. / 1 ns smearing (arXiv:2511.13111),
+                and is never perturbed again. A selection spanning both (or
                 neither) raises ``ValueError``. The two pulsemaps are
                 different processing stages of the chain and are not directly
                 comparable.
@@ -359,12 +369,6 @@ class NuBenchDataset(ERDAHostedDataset):
                 which the precomputed ``DataRepresentation`` was stored
                 at conversion time. Defaults to ``"GraphDefinition"``.
                 Set to ``None`` to read raw tables instead.
-            disable_test_perturbation: If True (default), the test split is
-                built from a perturbation-free copy of
-                ``data_representation`` so its already-smeared
-                ``pulses_no_noise`` events are not perturbed a second time.
-                Set to False to keep applying ``data_representation``'s
-                ``perturbation_dict`` to the test split as well.
             **kwargs: Forwarded to :class:`ERDAHostedDataset`.
         """
         if name not in self._registry:
@@ -386,8 +390,8 @@ class NuBenchDataset(ERDAHostedDataset):
         self._spec = spec
         self._custom_train_selection = train_selection
         self._custom_test_selection = test_selection
-        # Pulsemap for a custom test partition, resolved in `_prepare_args` from
-        # whether the selection is a subset of the train or the test selection.
+        # None until `_prepare_args` can read the selection files to tell
+        # whether a custom test set is a train- or test-pool subset.
         self._custom_test_pulsemap: Optional[str] = None
         self._experiment = spec.experiment
         self._comments = spec.comments
@@ -403,28 +407,16 @@ class NuBenchDataset(ERDAHostedDataset):
         # split so train/val/test can use different pulsemaps.
         self._pulsemaps = [spec.pulsemap_per_split["train"]]
 
-        # Test events live in the `pulses_no_noise` pulsemap, whose charge
-        # and time already carry NuBench's pulse smearing (std 0.25 p.e. and
-        # 1 ns; arXiv:2511.13111). By default a perturbation-free twin lets
-        # `_create_dataset` build the test split without re-applying that
-        # smearing, while train/val keep the configured perturbation that
-        # emulates it on the raw `merged_photons` hits. With the flag off the
-        # test split shares the perturbing representation. Set before
-        # `super().__init__`, which builds the test split via `_create_dataset`
-        # and so reads these attributes.
-        self._disable_test_perturbation = disable_test_perturbation
-        self._test_data_representation = (
-            self._without_perturbation(data_representation)
-            if disable_test_perturbation
-            else data_representation
-        )
-
         super().__init__(
             download_dir=download_dir,
             data_representation=data_representation,
             backend=backend,
             **kwargs,
         )
+
+        # After `super().__init__`, which initialises the logger the warning
+        # needs.
+        self._warn_if_missing_smear_perturbation()
 
     @classmethod
     def available_datasets(cls) -> List[str]:
@@ -501,12 +493,9 @@ class NuBenchDataset(ERDAHostedDataset):
                 self._custom_train_selection, default_train_sel, "train"
             )
         if self._custom_test_selection is not None:
-            # A custom test partition may be a held-out slice of the train data
-            # (events live in `merged_photons`) or a slice of the official test
-            # set (events live in `pulses_no_noise`). The two default selections
-            # are disjoint, so subset membership unambiguously identifies which,
-            # and hence which pulsemap to serve (see `_create_dataset`). Raise if
-            # the selection belongs to neither.
+            # The default train and test selections are disjoint, so a custom
+            # test set's pulsemap is fixed by which one it is a subset of;
+            # belonging to neither is ambiguous and rejected.
             custom = list(self._custom_test_selection)
             custom_set = set(custom)
             if custom_set.issubset(default_train_sel):
@@ -532,10 +521,9 @@ class NuBenchDataset(ERDAHostedDataset):
             self._custom_train_selection is not None
             or self._custom_test_selection is not None
         ):
-            # Custom selections can place the same event_no in both splits (a
-            # custom test drawn from the train pool is the common case), so
-            # enforce a disjoint train/test split. The default selections are
-            # disjoint by construction, hence the guard.
+            # Unlike the default selections, custom ones can put the same
+            # event_no in both splits, so guard against a leaky train/test
+            # split.
             overlap = set(test_sel).intersection(train_sel)
             if overlap:
                 raise ValueError(
@@ -582,6 +570,49 @@ class NuBenchDataset(ERDAHostedDataset):
             )
         return list(custom)
 
+    def _warn_if_missing_smear_perturbation(self) -> None:
+        """Warn when ``data_representation`` won't emulate NuBench smearing.
+
+        The train/val ``merged_photons`` pulsemap holds raw integer photon
+        counts and raw hit times, while the test ``pulses_no_noise`` pulsemap
+        carries NuBench's per-pulse smearing (std 0.25 p.e. on charge, 1 ns on
+        time; arXiv:2511.13111). The ``perturbation_dict`` is what reproduces
+        that smearing on the raw train/val hits. Without it -- or with stds
+        differing from the NuBench values -- the train/val and test splits are
+        drawn from different distributions, so warn the user.
+        """
+        pdict = getattr(self._data_representation, "_perturbation_dict", None)
+        configured = pdict if isinstance(pdict, dict) else {}
+        missing = [f for f in _SMEAR_PERTURBATION if f not in configured]
+        if missing:
+            self.warning_once(
+                f"NuBench dataset {self._name!r}: `data_representation` has "
+                f"no perturbation for {missing}. The train/val "
+                "`merged_photons` pulsemap keeps its raw integer photon "
+                "counts and raw hit times, while the test `pulses_no_noise` "
+                "pulsemap carries NuBench's 0.25 p.e. / 1 ns smearing "
+                "(arXiv:2511.13111); the splits are therefore drawn from "
+                "different distributions. Pass "
+                f"`perturbation_dict={_SMEAR_PERTURBATION}` to the data "
+                "representation to emulate the smearing on the raw train/val "
+                "hits."
+            )
+            return
+        mismatched = {
+            f: configured[f]
+            for f, std in _SMEAR_PERTURBATION.items()
+            if configured[f] != std
+        }
+        if mismatched:
+            self.warning_once(
+                f"NuBench dataset {self._name!r}: `data_representation` "
+                f"perturbs {mismatched}, which differs from NuBench's "
+                f"smearing of {_SMEAR_PERTURBATION} (0.25 p.e. on charge, 1 "
+                "ns on time; arXiv:2511.13111). The emulated train/val "
+                "smearing will not match the test `pulses_no_noise` "
+                "distribution."
+            )
+
     @staticmethod
     def _without_perturbation(
         data_representation: DataRepresentation,
@@ -606,9 +637,6 @@ class NuBenchDataset(ERDAHostedDataset):
     ) -> Union[EnsembleDataset, Dataset]:
         """Select the correct pulsemap for this split, then delegate."""
         pmap = dict(self._spec.pulsemap_per_split)
-        # A custom test partition is served from the pulsemap resolved in
-        # `_prepare_args` (train `merged_photons` or test `pulses_no_noise`),
-        # depending on which default selection it is a subset of.
         if self._custom_test_pulsemap is not None:
             pmap["test"] = self._custom_test_pulsemap
         if selection is self._test_selection:
@@ -618,35 +646,19 @@ class NuBenchDataset(ERDAHostedDataset):
         else:
             key = "train"
         self._dataset_args["pulsemaps"] = [pmap[key]]
-        # The default test pulses (`pulses_no_noise`) are already smeared, so
-        # build that split from the perturbation-free twin. A custom test
-        # partition redirected to the train (`merged_photons`) pulsemap is raw
-        # and must keep the perturbing original to emulate the smearing, like
-        # train/val.
+
+        # Only the `pulses_no_noise` pulsemap is already smeared, so it alone
+        # drops the perturbation to avoid smearing twice; every raw
+        # `merged_photons` split keeps it to emulate the smearing.
         test_is_presmeared = (
             key == "test"
             and pmap["test"] == self._spec.pulsemap_per_split["test"]
         )
-        # Smearing the `pulses_no_noise` test pulsemap (default test set or a
-        # custom subset of it) re-applies a perturbation on top of NuBench's
-        # baked-in 0.25 p.e. / 1 ns smearing, i.e. double-smears the test
-        # inputs. Warn when that combination is requested and actually perturbs.
-        if (
-            test_is_presmeared
-            and not self._disable_test_perturbation
-            and isinstance(
-                getattr(self._data_representation, "_perturbation_dict", None),
-                dict,
-            )
-        ):
-            self.warning_once(
-                "Perturbing the `pulses_no_noise` test pulsemap, whose charge "
-                "and time already carry NuBench's 0.25 p.e. / 1 ns smearing: "
-                "the test inputs will be smeared twice. Set "
-                "`disable_test_perturbation=True` unless this is intended."
-            )
+        # `_data_representation` is a required NuBench argument; the base type
+        # is Optional only for the deprecated `graph_definition` path.
+        assert self._data_representation is not None
         self._dataset_args["data_representation"] = (
-            self._test_data_representation
+            self._without_perturbation(self._data_representation)
             if test_is_presmeared
             else self._data_representation
         )
