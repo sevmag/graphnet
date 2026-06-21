@@ -215,9 +215,16 @@ class NuBenchDataset(ERDAHostedDataset):
             train_selection: Optional list of ``event_no`` to use for
                 the train split, overriding the default selection file.
                 Must be a subset of the default train selection.
-            test_selection: Optional list of ``event_no`` to use for
-                the test split, overriding the default selection file.
-                Must be a subset of the default test selection.
+            test_selection: Optional list of ``event_no`` to use for the
+                test split. Must be a subset of either the default train
+                selection or the default test selection; the matching
+                pulsemap is used automatically -- a subset of the train
+                selection is served from the train (``merged_photons``)
+                pulsemap, a subset of the test selection from the
+                ``pulses_no_noise`` pulsemap. A selection spanning both (or
+                neither) raises ``ValueError``. The two pulsemaps are
+                different processing stages of the chain and are not directly
+                comparable.
             backend: ``"sqlite"`` (default, ERDA-hosted) or ``"lmdb"``.
                 The on-disk layout under ``download_dir/<name>/`` is
                 parallel for both backends: SQLite expects
@@ -254,6 +261,9 @@ class NuBenchDataset(ERDAHostedDataset):
         self._spec = spec
         self._custom_train_selection = train_selection
         self._custom_test_selection = test_selection
+        # Pulsemap for a custom test partition, resolved in `_prepare_args` from
+        # whether the selection is a subset of the train or the test selection.
+        self._custom_test_pulsemap: Optional[str] = None
         self._experiment = spec.experiment
         self._comments = spec.comments
         self._features = spec.features
@@ -333,7 +343,7 @@ class NuBenchDataset(ERDAHostedDataset):
             db_path = os.path.join(self.dataset_dir, self._spec.lmdb_relpath)
         else:
             db_path = os.path.join(self.dataset_dir, self._spec.db_relpath)
-        train_sel = pd.read_parquet(
+        default_train_sel = pd.read_parquet(
             os.path.join(
                 self.dataset_dir, self._spec.selection_relpaths["train"]
             )
@@ -344,14 +354,38 @@ class NuBenchDataset(ERDAHostedDataset):
             )
         )["event_no"].tolist()
 
+        train_sel = default_train_sel
         if self._custom_train_selection is not None:
             train_sel = self._apply_custom_selection(
-                self._custom_train_selection, train_sel, "train"
+                self._custom_train_selection, default_train_sel, "train"
             )
         if self._custom_test_selection is not None:
-            test_sel = self._apply_custom_selection(
-                self._custom_test_selection, test_sel, "test"
-            )
+            # A custom test partition may be a held-out slice of the train data
+            # (events live in `merged_photons`) or a slice of the official test
+            # set (events live in `pulses_no_noise`). The two default selections
+            # are disjoint, so subset membership unambiguously identifies which,
+            # and hence which pulsemap to serve (see `_create_dataset`). Raise if
+            # the selection belongs to neither.
+            custom = list(self._custom_test_selection)
+            custom_set = set(custom)
+            if custom_set.issubset(default_train_sel):
+                self._custom_test_pulsemap = self._spec.pulsemap_per_split[
+                    "train"
+                ]
+            elif custom_set.issubset(test_sel):
+                self._custom_test_pulsemap = self._spec.pulsemap_per_split[
+                    "test"
+                ]
+            else:
+                orphans = sorted(
+                    custom_set - set(default_train_sel) - set(test_sel)
+                )
+                raise ValueError(
+                    f"Custom test selection is not a subset of either the "
+                    f"train or the test selection: {len(orphans)} event_no(s) "
+                    f"in neither (e.g. {orphans[:5]})."
+                )
+            test_sel = custom
 
         dataset_args = {
             "path": db_path,
@@ -396,7 +430,12 @@ class NuBenchDataset(ERDAHostedDataset):
         selection: Union[List[int], List[List[int]], List[float]],
     ) -> Union[EnsembleDataset, Dataset]:
         """Select the correct pulsemap for this split, then delegate."""
-        pmap = self._spec.pulsemap_per_split
+        pmap = dict(self._spec.pulsemap_per_split)
+        # A custom test partition is served from the pulsemap resolved in
+        # `_prepare_args` (train `merged_photons` or test `pulses_no_noise`),
+        # depending on which default selection it is a subset of.
+        if self._custom_test_pulsemap is not None:
+            pmap["test"] = self._custom_test_pulsemap
         if selection is self._test_selection:
             key = "test"
         elif selection is getattr(self, "_val_selection", None):
