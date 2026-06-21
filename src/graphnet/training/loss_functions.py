@@ -619,6 +619,21 @@ class RMSEVonMisesFisher3DLoss(EnsembleLoss):
         )
 
 
+# Map a `loss_precision` string to the dtype the loss math runs in. Strings not
+# listed here (e.g. "none"/None) mean "no override" -- run in the ambient
+# autocast dtype.
+_LOSS_PRECISION_DTYPES: Dict[str, torch.dtype] = {
+    "fp32": torch.float32,
+    "float32": torch.float32,
+    "32": torch.float32,
+    "32-true": torch.float32,
+    "fp64": torch.float64,
+    "float64": torch.float64,
+    "64": torch.float64,
+    "64-true": torch.float64,
+}
+
+
 class _DirectionalDistributionLoss(LossFunction):
     """Adapter for losses from the `directional-distributions` package.
 
@@ -629,15 +644,59 @@ class _DirectionalDistributionLoss(LossFunction):
     _n_params: int
     _loss_fn: Any
 
+    def __init__(
+        self, loss_precision: Optional[str] = "fp32", **kwargs: Any
+    ) -> None:
+        """Construct the angular-distribution loss.
+
+        Args:
+            loss_precision: dtype the (numerically sensitive) loss math runs
+                in, independent of the Trainer's autocast precision. The
+                angular-Gaussian NLLs hinge on the cancellation 0.5*(S - T^2)
+                with S ~ T^2 ~ O(thousands) at high concentration; under
+                bf16/fp16 that difference keeps only ~3 significant digits and
+                NaNs the run (bf16-vs-fp32 ablation: bf16 dies at the
+                concentration ramp, fp32 survives). ``"fp32"`` (default) or
+                ``"fp64"`` run the math in that dtype with autocast disabled;
+                ``"none"`` / ``None`` leaves it in the ambient autocast dtype
+                (reproduces the bf16 instability). Guarding only this one
+                sensitive part keeps the bf16 backbone speed.
+        """
+        super().__init__(**kwargs)
+        self._loss_precision = loss_precision
+
+    def _loss_dtype(self) -> Optional[torch.dtype]:
+        """Resolve ``loss_precision`` to a dtype, or None for no override."""
+        lp = self._loss_precision
+        if lp is None:
+            return None
+        key = str(lp).lower()
+        if key in ("none", "", "keep", "auto"):
+            return None
+        if key not in _LOSS_PRECISION_DTYPES:
+            raise ValueError(
+                f"Unsupported loss_precision {lp!r}; use one of "
+                f"{sorted(_LOSS_PRECISION_DTYPES)} or 'none'."
+            )
+        return _LOSS_PRECISION_DTYPES[key]
+
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
-        # Targets typically arrive as float64 (numpy/SQL default) while the
-        # model emits float32. The package's losses use torch.einsum, which
-        # is strict about matching dtypes (unlike `*` / `torch.sum`, which
-        # silently promote and let vMF get away with mixed precision). Cast
-        # the target to the prediction's dtype so the loss runs in the same
-        # precision as training.
-        target = target.reshape(-1, 3).to(prediction.dtype)
         assert prediction.dim() == 2 and prediction.size(1) == self._n_params
+        dtype = self._loss_dtype()
+        if dtype is not None:
+            with torch.autocast(
+                device_type=prediction.device.type, enabled=False
+            ):
+                return self._eval(prediction.to(dtype), target.to(dtype))
+        return self._eval(prediction, target.to(prediction.dtype))
+
+    def _eval(self, prediction: Tensor, target: Tensor) -> Tensor:
+        # Targets typically arrive as float64 (numpy/SQL default) while the
+        # model emits float32. The package's losses use torch.einsum, which is
+        # strict about matching dtypes (unlike `*` / `torch.sum`, which
+        # silently promote and let vMF get away with mixed precision), so
+        # `_forward` casts prediction and target to a common dtype first.
+        target = target.reshape(-1, 3)
         assert prediction.size(0) == target.size(0)
         return type(self)._loss_fn(prediction, target, reduction="none")
 
