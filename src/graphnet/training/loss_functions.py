@@ -726,11 +726,12 @@ class EllipticallySymmetricAngularGaussianLoss(_DirectionalDistributionLoss):
 class GeneralAngularGaussianLoss(_DirectionalDistributionLoss):
     """General Angular Gaussian NLL on S^2.
 
-    Prediction shape [N, 9]: 0:3 mu, 3:6 raw log-diagonal of Cholesky L,
-    6:9 off-diagonal (L_21, L_31, L_32). Target shape [N, 3].
+    Prediction shape [N, 8]: 0:3 mu, 3:5 first two raw log-diagonal
+    entries of Cholesky L (the third is fixed by det(L) = 1), 5:8 off-
+    diagonal (L_21, L_31, L_32). Target shape [N, 3].
     """
 
-    _n_params = 9
+    _n_params = 8
     _loss_fn = staticmethod(gag_nll_loss)
 
 
