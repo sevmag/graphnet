@@ -387,6 +387,22 @@ class NuBenchDataset(ERDAHostedDataset):
                 )
             test_sel = custom
 
+        if (
+            self._custom_train_selection is not None
+            or self._custom_test_selection is not None
+        ):
+            # Custom selections can place the same event_no in both splits (a
+            # custom test drawn from the train pool is the common case), so
+            # enforce a disjoint train/test split. The default selections are
+            # disjoint by construction, hence the guard.
+            overlap = set(test_sel).intersection(train_sel)
+            if overlap:
+                raise ValueError(
+                    f"Custom train and test selections overlap: "
+                    f"{len(overlap)} shared event_no(s) (e.g. "
+                    f"{sorted(overlap)[:5]}). Train and test must be disjoint."
+                )
+
         dataset_args = {
             "path": db_path,
             "pulsemaps": self._pulsemaps,
