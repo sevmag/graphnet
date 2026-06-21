@@ -9,3 +9,4 @@ from .nubench_datasets import (
     FEATURES_NUBENCH,
     TRUTH_NUBENCH,
 )
+from .prometheus_local_datasets import IceCubePrometheusDataset
