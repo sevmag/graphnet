@@ -174,7 +174,15 @@ class FourierEncoderEPJC(LightningModule):
         x: Tensor,
         seq_length: Tensor,
     ) -> Tensor:
-        """Forward pass."""
+        """Forward pass.
+
+        `x` may be a padded sequence [B, L, D] or a jagged `NestedTensor`
+        [B, j, D]. The encoding is per-pulse, so on jagged input it runs on
+        the flat values buffer -- no compute on padding -- and is rewrapped
+        with the input's offsets.
+        """
+        if x.is_nested:
+            return self._forward_jagged(x, seq_length)
         length = torch.log10(seq_length.to(dtype=x.dtype))
         embeddings = [self.sin_emb(4096 * x[:, :, :3]).flatten(-2)]  # Position
 
@@ -194,6 +202,41 @@ class FourierEncoderEPJC(LightningModule):
         x = self.mlp(x)
 
         return x
+
+    def _forward_jagged(self, x: Tensor, seq_length: Tensor) -> Tensor:
+        """Encode a jagged `NestedTensor` on its dense values buffer.
+
+        All compute happens on the flat [total_pulses, D] buffer: jagged
+        eager kernels do not cover every op used here (notably under
+        `torch.inference_mode`), whereas dense ops always work and are
+        mathematically identical because the encoding is per-pulse.
+        """
+        v = x.values()
+        length = torch.log10(seq_length.to(dtype=v.dtype))
+        embeddings = [self.sin_emb(4096 * v[:, :3]).flatten(-2)]  # Position
+
+        if self.n_features >= 5:
+            embeddings.append(self.sin_emb(1024 * v[:, 4]))  # Charge
+
+        embeddings.append(self.sin_emb(4096 * v[:, 3]))  # Time
+
+        if self.n_features >= 6:
+            embeddings.append(self.aux_emb(v[:, 5].long()))  # Auxiliary
+
+        # Each pulse receives its event's length embedding; indexing per
+        # pulse replaces the padded route's expand to the batch-max length.
+        batch_idx = torch.repeat_interleave(
+            torch.arange(seq_length.numel(), device=v.device), seq_length
+        )
+        embeddings.append(self.sin_emb2(length)[batch_idx])  # Length
+
+        out = self.mlp(torch.cat(embeddings, -1))
+        return torch.nested.nested_tensor_from_jagged(
+            out,
+            x.offsets(),
+            min_seqlen=x._get_min_seqlen(),
+            max_seqlen=x._get_max_seqlen(),
+        )
 
 
 class FourierEncoder(LightningModule):

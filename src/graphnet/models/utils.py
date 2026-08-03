@@ -71,7 +71,8 @@ def array_to_sequence(
     batch_idx: LongTensor,
     padding_value: Any = 0,
     excluding_value: Any = torch.inf,
-) -> Tuple[Tensor, Tensor, Tensor]:
+    nested: bool = False,
+) -> Tuple[Tensor, Optional[Tensor], Tensor]:
     """Convert `x` of shape [n,d] into a padded sequence of shape [B, L, D].
 
        Where B is the batch size, L is the sequence length and D is the
@@ -86,12 +87,38 @@ def array_to_sequence(
         padding_value: The value to use for padding.
         excluding_value: This parameter represents a unique value that should
                 not be present in the input tensor 'x'
+        nested: Return `x` as a jagged `NestedTensor` instead of a padded
+                sequence. No padding is materialised, so no row of `x` needs
+                to match `excluding_value` and the returned mask is `None`.
+
     Returns:
-        x: Padded sequence with dimensions  [B, L, D].
-        mask: A tensor that identifies masked entries in `x`.
+        x: Padded sequence with dimensions  [B, L, D], or a jagged
+           `NestedTensor` of shape [B, j, D] if `nested` is True.
+        mask: A tensor that identifies masked entries in `x`, or `None`
+               if `nested` is True (a jagged tensor has no padding to mask).
                E.g. : `masked_entries = x[mask]`
         seq_length: A tensor containing the number of pulses in each event.
     """
+    _, seq_length = torch.unique(batch_idx, return_counts=True)
+
+    if nested:
+        # `x` is already grouped by event (torch_geometric batching), so it
+        # is the jagged values buffer as-is; only offsets need computing.
+        offsets = torch.zeros(
+            seq_length.numel() + 1, dtype=torch.long, device=x.device
+        )
+        offsets[1:] = torch.cumsum(seq_length, dim=0)
+        # The fused varlen attention kernels require max_seqlen; computing
+        # it here costs one host sync, matching the padded route (which
+        # syncs in `tolist`).
+        nested_x = torch.nested.nested_tensor_from_jagged(
+            x,
+            offsets,
+            min_seqlen=1,
+            max_seqlen=int(seq_length.max()),
+        )
+        return nested_x, None, seq_length
+
     if torch.any(torch.eq(x, excluding_value)):
         raise ValueError(
             f"Transformation cannot be made because input tensor "
@@ -99,7 +126,6 @@ def array_to_sequence(
             f"excluding value {excluding_value}."
         )
 
-    _, seq_length = torch.unique(batch_idx, return_counts=True)
     x_list = torch.split(x, seq_length.tolist())
 
     x = torch.nn.utils.rnn.pad_sequence(
