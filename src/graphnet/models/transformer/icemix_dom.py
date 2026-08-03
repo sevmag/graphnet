@@ -1,10 +1,10 @@
 """DeepIce variant whose tokens carry no absolute spacetime.
 
 Pulses are tokenized from DOM identity and charge only; coordinates and
-times reach the model exclusively through relative attention-level
-encodings (spacetime RoPE), making predictions invariant to a global
-time offset by construction and replacing hand-scaled coordinate
-sinusoids with a learned per-sensor code.
+times reach the model exclusively through the rotary spacetime attention
+of `DeepIceRope`, making predictions invariant to a global time offset by
+construction and replacing hand-scaled coordinate sinusoids with a
+learned per-sensor code.
 """
 
 import torch
@@ -16,7 +16,7 @@ from typing import Optional
 from pytorch_lightning import LightningModule
 
 from graphnet.models.components.embedding import SinusoidalPosEmb
-from graphnet.models.gnn.icemix import DeepIce
+from graphnet.models.transformer.icemix_rope import DeepIceRope
 
 
 class DOMChargeEncoder(LightningModule):
@@ -156,14 +156,13 @@ class DOMChargeEncoder(LightningModule):
         return self.mlp(torch.cat(embeddings, -1))
 
 
-class DeepIceDOM(DeepIce):
-    """`DeepIce` tokenized by `DOMChargeEncoder` instead of `FourierEncoder`.
+class DeepIceDOM(DeepIceRope):
+    """`DeepIceRope` tokenized by `DOMChargeEncoder`, not `FourierEncoder`.
 
-    Identical transformer to `DeepIce` (same blocks, depths, rotary
-    encoding and jagged execution paths); only the pulse tokenizer differs.
-    Intended for the rotary configuration (`vanilla_only` +
-    `spacetime_rope`): with absolute coordinates absent from the tokens,
-    the rotary encoding is the model's only source of pairwise geometry.
+    Identical transformer to `DeepIceRope` (same blocks, depths, rotary
+    encoding and jagged execution); only the pulse tokenizer differs. With
+    absolute coordinates absent from the tokens, the rotary encoding is
+    the model's only source of pairwise geometry.
     """
 
     def __init__(
@@ -175,15 +174,10 @@ class DeepIceDOM(DeepIce):
         depth: int = 12,
         head_size: int = 32,
         depth_rel: int = 4,
-        n_rel: int = 1,
         scaled_emb: bool = False,
         n_features: int = 5,
-        use_nested_attention: bool = False,
-        vanilla_only: bool = False,
+        rope_per_axis: bool = True,
         compile_blocks: bool = False,
-        qk_norm: bool = False,
-        spacetime_rope: bool = False,
-        rope_per_axis: bool = False,
     ):
         """Construct `DeepIceDOM`.
 
@@ -196,19 +190,15 @@ class DeepIceDOM(DeepIce):
             seq_length: The base feature dimension.
             depth: The depth of the transformer.
             head_size: The size of the attention heads.
-            depth_rel: The depth of the relative transformer.
-            n_rel: The number of relative transformer layers to use.
+            depth_rel: The number of blocks standing in for `DeepIce`'s
+                relative-attention sandwich (see `DeepIceRope`).
             scaled_emb: Whether to scale the sinusoidal positional
                 embeddings.
             n_features: The number of features in the input data. Must be 5
                 (NuBench order x, y, z, charge, t): the tokenizer reads
                 charge from column 3.
-            use_nested_attention: See `DeepIce`.
-            vanilla_only: See `DeepIce`.
-            compile_blocks: See `DeepIce`.
-            qk_norm: See `DeepIce`.
-            spacetime_rope: See `DeepIce`.
-            rope_per_axis: See `DeepIce`.
+            rope_per_axis: See `DeepIceRope`.
+            compile_blocks: See `DeepIceRope`.
         """
         if n_features != 5:
             raise ValueError(
@@ -223,17 +213,10 @@ class DeepIceDOM(DeepIce):
             depth=depth,
             head_size=head_size,
             depth_rel=depth_rel,
-            n_rel=n_rel,
             scaled_emb=scaled_emb,
-            include_dynedge=False,
-            dynedge_args=None,
             n_features=n_features,
-            use_nested_attention=use_nested_attention,
-            vanilla_only=vanilla_only,
-            compile_blocks=compile_blocks,
-            qk_norm=qk_norm,
-            spacetime_rope=spacetime_rope,
             rope_per_axis=rope_per_axis,
+            compile_blocks=compile_blocks,
         )
         self.fourier_ext = DOMChargeEncoder(
             sensor_table_path=sensor_table_path,
