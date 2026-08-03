@@ -15,7 +15,7 @@ from torch_geometric.typing import Adj, PairTensor
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.inits import reset
 from torch_geometric.data import Data
-from torch.nn.functional import linear
+from torch.nn.functional import linear, scaled_dot_product_attention
 from torch.nn.modules import TransformerEncoder, TransformerEncoderLayer
 from torch_geometric.utils import to_dense_batch, softmax
 from torch_scatter import scatter
@@ -302,6 +302,8 @@ class Block_rel(LightningModule):
         activation: nn.Module = nn.GELU,
         norm_layer: nn.Module = nn.LayerNorm,
         attn_head_dim: Optional[int] = None,
+        use_attn_bias: bool = True,
+        use_activation_bias: bool = True,
     ):
         """Construct 'Block_rel'.
 
@@ -325,6 +327,10 @@ class Block_rel(LightningModule):
             norm_layer: Normalization layer to use.
             attn_head_dim: Dimension of the attention head outputs in the
                 `Attention_rel` layer.
+            use_attn_bias: Inject the relative-position bias into the
+                pre-softmax attention logits. Defaults to True.
+            use_activation_bias: Inject the relative-position bias into the
+                post-softmax output activations. Defaults to True.
         """
         super().__init__()
         self.norm1 = norm_layer(input_dim)
@@ -335,6 +341,8 @@ class Block_rel(LightningModule):
             qkv_bias=qkv_bias,
             qk_scale=qk_scale,
             attn_head_dim=attn_head_dim,
+            use_attn_bias=use_attn_bias,
+            use_activation_bias=use_activation_bias,
         )
         self.drop_path = (
             DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -410,6 +418,8 @@ class Attention_rel(LightningModule):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         attn_head_dim: Optional[int] = None,
+        use_attn_bias: bool = True,
+        use_activation_bias: bool = True,
     ):
         """Construct 'Attention_rel'.
 
@@ -427,6 +437,11 @@ class Attention_rel(LightningModule):
                 module. Defaults to 0.0.
             attn_head_dim: the feature dimensionality of each attention head.
                 Defaults to None. If None, computed as `dim // num_heads`.
+            use_attn_bias: inject the relative-position bias into the
+                pre-softmax attention logits (`<q_i, R_ij>`). Defaults to True.
+            use_activation_bias: inject the relative-position bias into the
+                post-softmax output activations (`sum_j P_ij R_ij`). Defaults
+                to True.
         """
         if input_dim <= 0 or num_heads <= 0:
             raise ValueError(
@@ -436,6 +451,8 @@ class Attention_rel(LightningModule):
 
         super().__init__()
         self.num_heads = num_heads
+        self.use_attn_bias = use_attn_bias
+        self.use_activation_bias = use_activation_bias
         head_dim = attn_head_dim or input_dim // num_heads
         all_head_dim = head_dim * self.num_heads
         self.scale = qk_scale or head_dim**-0.5
@@ -480,7 +497,7 @@ class Attention_rel(LightningModule):
 
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
-        if rel_pos_bias is not None:
+        if rel_pos_bias is not None and self.use_attn_bias:
             bias = torch.einsum("bhic,bijc->bhij", q, rel_pos_bias)
             attn = attn + bias
         if key_padding_mask is not None:
@@ -503,12 +520,31 @@ class Attention_rel(LightningModule):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2)
-        if rel_pos_bias is not None:
+        if rel_pos_bias is not None and self.use_activation_bias:
             x = x + torch.einsum("bhij,bijc->bihc", attn, rel_pos_bias)
         x = x.reshape(batch_size, event_length, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+
+def apply_spacetime_rope(
+    t: Tensor, cos: Tensor, sin: Tensor, num_heads: int, head_dim: int
+) -> Tensor:
+    """Rotate per-head 2D subspaces of `t` by per-token angles (RoPE).
+
+    `t` is a dense `[N, num_heads * head_dim]` projection buffer; `cos`/`sin`
+    are `[N, head_dim // 2]` per-token rotation angles shared across heads.
+    Rotations preserve norms and make the q.k dot product depend on the
+    coordinates only through per-token angle *differences*, i.e. relative
+    spacetime geometry, at zero extra attention cost.
+    """
+    th = t.unflatten(-1, [num_heads, head_dim])
+    half = head_dim // 2
+    t1, t2 = th[..., :half], th[..., half:]
+    c = cos.to(t.dtype).unsqueeze(-2)
+    s = sin.to(t.dtype).unsqueeze(-2)
+    return torch.cat([t1 * c - t2 * s, t1 * s + t2 * c], dim=-1).flatten(-2)
 
 
 class Block(LightningModule):
@@ -525,6 +561,7 @@ class Block(LightningModule):
         init_values: Optional[float] = None,
         activation: nn.Module = nn.GELU,
         norm_layer: nn.Module = nn.LayerNorm,
+        qk_norm: bool = False,
     ):
         """Construct 'Block'.
 
@@ -543,12 +580,24 @@ class Block(LightningModule):
                 parameters if not `None`.
             activation: Activation function to use in the `Mlp` layer.
             norm_layer: Normalization layer to use.
+            qk_norm: Apply a per-head RMSNorm to queries and keys before
+                attention. Bounds the attention-logit scale, preventing the
+                unbounded QK-weight growth / attention-entropy collapse that
+                destabilizes training without a relative attention bias.
+                Only implemented for the jagged path (`forward_jagged`);
+                the padded path raises, as `nn.MultiheadAttention`'s fused
+                forward does not expose q/k.
         """
         super().__init__()
         self.norm1 = norm_layer(input_dim)
         self.attn = nn.MultiheadAttention(
             input_dim, num_heads, dropout=attn_drop, batch_first=True
         )
+        if qk_norm:
+            self.q_norm: Optional[nn.Module] = nn.RMSNorm(self.attn.head_dim)
+            self.k_norm: Optional[nn.Module] = nn.RMSNorm(self.attn.head_dim)
+        else:
+            self.q_norm = self.k_norm = None
         self.drop_path = (
             DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         )
@@ -571,6 +620,96 @@ class Block(LightningModule):
         else:
             self.gamma_1, self.gamma_2 = None, None
 
+    def _nested_self_attention(
+        self,
+        v: Tensor,
+        offsets: Tensor,
+        min_seqlen: int,
+        max_seqlen: int,
+        rope_cos: Optional[Tensor] = None,
+        rope_sin: Optional[Tensor] = None,
+    ) -> Tensor:
+        """Self-attention over a jagged sequence held as dense values.
+
+        `v` is the `[total_tokens, D]` value buffer of a jagged
+        `NestedTensor` and `offsets` marks the event boundaries. The same
+        projection->attention->projection as `self.attn` is computed
+        (reusing its weights) through `scaled_dot_product_attention`, which
+        dispatches to fused variable-length (flash) kernels on a jagged
+        tensor. Only the attention itself touches the `NestedTensor`; the
+        projections and head reshapes stay on the dense buffer, since eager
+        jagged tensors lack `layer_norm`/`unflatten` under `inference_mode`
+        (the eval/predict path) and would otherwise raise there.
+        """
+        attn = self.attn
+        qkv = linear(v, attn.in_proj_weight, attn.in_proj_bias)
+        q, k, val = qkv.chunk(3, dim=-1)
+        if self.q_norm is not None and self.k_norm is not None:
+            # On the dense buffer: eager jagged tensors lack the norm ops.
+            heads = [attn.num_heads, attn.head_dim]
+            q = self.q_norm(q.unflatten(-1, heads)).flatten(-2)
+            k = self.k_norm(k.unflatten(-1, heads)).flatten(-2)
+        if rope_cos is not None and rope_sin is not None:
+            # After the norm: rotations preserve the normalized RMS.
+            q = apply_spacetime_rope(
+                q, rope_cos, rope_sin, attn.num_heads, attn.head_dim
+            )
+            k = apply_spacetime_rope(
+                k, rope_cos, rope_sin, attn.num_heads, attn.head_dim
+            )
+
+        def to_heads(t: Tensor) -> Tensor:
+            # dense [N, D] -> jagged [B, num_heads, S*, head_dim]
+            t = t.contiguous().unflatten(-1, [attn.num_heads, attn.head_dim])
+            t = torch.nested.nested_tensor_from_jagged(
+                t, offsets, min_seqlen=min_seqlen, max_seqlen=max_seqlen
+            )
+            return t.transpose(1, 2)
+
+        out = scaled_dot_product_attention(
+            to_heads(q),
+            to_heads(k),
+            to_heads(val),
+            dropout_p=attn.dropout if self.training else 0.0,
+        )
+        out = (
+            out.transpose(1, 2)
+            .values()
+            .reshape(-1, attn.num_heads * attn.head_dim)
+        )
+        return linear(out, attn.out_proj.weight, attn.out_proj.bias)
+
+    def forward_jagged(
+        self,
+        v: Tensor,
+        offsets: Tensor,
+        min_seqlen: int,
+        max_seqlen: int,
+        rope_cos: Optional[Tensor] = None,
+        rope_sin: Optional[Tensor] = None,
+    ) -> Tensor:
+        """Block forward on the dense values of a jagged sequence.
+
+        Normalisation, the MLP and the residual adds are per-token, so they
+        run on the dense value buffer; only attention is aware of the event
+        boundaries carried by `offsets`.
+        """
+        attn_out = self._nested_self_attention(
+            self.norm1(v),
+            offsets,
+            min_seqlen,
+            max_seqlen,
+            rope_cos=rope_cos,
+            rope_sin=rope_sin,
+        )
+        if self.gamma_1 is None:
+            v = v + self.drop_path(attn_out)
+            v = v + self.drop_path(self.mlp(self.norm2(v)))
+        else:
+            v = v + self.drop_path(self.gamma_1 * attn_out)
+            v = v + self.drop_path(self.gamma_2 * self.mlp(self.norm2(v)))
+        return v
+
     def forward(
         self,
         x: Tensor,
@@ -578,32 +717,42 @@ class Block(LightningModule):
         key_padding_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """Forward pass."""
-        if self.gamma_1 is None:
-            xn = self.norm1(x)
-            x = x + self.drop_path(
-                self.attn(
-                    xn,
-                    xn,
-                    xn,
-                    attn_mask=attn_mask,
-                    key_padding_mask=key_padding_mask,
-                    need_weights=False,
-                )[0]
+        if x.is_nested:
+            # Masks encode padding, which jagged tensors represent
+            # structurally; a mask here would be silently ignored.
+            assert attn_mask is None and key_padding_mask is None
+            out = self.forward_jagged(
+                x.values(),
+                x.offsets(),
+                x._get_min_seqlen(),
+                x._get_max_seqlen(),
             )
+            return torch.nested.nested_tensor_from_jagged(
+                out,
+                x.offsets(),
+                min_seqlen=x._get_min_seqlen(),
+                max_seqlen=x._get_max_seqlen(),
+            )
+        if self.q_norm is not None:
+            raise NotImplementedError(
+                "qk_norm is only implemented for the jagged path; "
+                "`nn.MultiheadAttention`'s fused forward does not "
+                "expose q/k."
+            )
+        xn = self.norm1(x)
+        attn_out = self.attn(
+            xn,
+            xn,
+            xn,
+            attn_mask=attn_mask,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+        )[0]
+        if self.gamma_1 is None:
+            x = x + self.drop_path(attn_out)
             x = x + self.drop_path(self.mlp(self.norm2(x)))
         else:
-            xn = self.norm1(x)
-            x = x + self.drop_path(
-                self.gamma_1
-                * self.attn(
-                    xn,
-                    xn,
-                    xn,
-                    attn_mask=attn_mask,
-                    key_padding_mask=key_padding_mask,
-                    need_weights=False,
-                )[0]
-            )
+            x = x + self.drop_path(self.gamma_1 * attn_out)
             x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
 
