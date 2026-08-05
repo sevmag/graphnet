@@ -51,7 +51,7 @@ ATOL_FP32_WITH_E = 5e-3
 # Machine epsilon per comparison dtype for the scale-aware elementwise
 # floor (bf16 has an 8-bit mantissa: rounding sites legitimately differ
 # between two correct pipelines by a few output-scale ulps).
-ULP = {torch.bfloat16: 2.0**-8}
+ULP = {torch.bfloat16: 2.0**-8, torch.float32: 2.0**-23}
 
 
 def _atol(dtype: torch.dtype, flags: Tuple[bool, bool]) -> float:
