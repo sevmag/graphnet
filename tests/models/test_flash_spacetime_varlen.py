@@ -134,8 +134,15 @@ def test_varlen_matches_padded(
         use_attn_bias=flags[0],
         use_activation_bias=flags[1],
     )
+    # The two layouts run identical tile arithmetic, but the compiler
+    # schedules each specialization independently, so low-precision
+    # outputs may differ by a few output-scale ulps.
+    if dtype is torch.bfloat16:
+        atol, rtol = 2e-2, 1e-2
+    else:
+        atol, rtol = 1e-5, 1e-4
     torch.testing.assert_close(
-        out_v, _unpad(out_p, lengths), atol=1e-5, rtol=1e-4
+        out_v, _unpad(out_p, lengths), atol=atol, rtol=rtol
     )
 
 

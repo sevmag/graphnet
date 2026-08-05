@@ -213,7 +213,7 @@ def flash_spacetime_fwd_kernel(
 
     # Runtime loop bound: keys exist only up to the event's length, in
     # both layouts.
-    for n0 in range(0, seqlen, BLOCK_N):
+    for n0 in tl.range(0, seqlen, BLOCK_N, num_stages=1):
         offs_n = n0 + tl.arange(0, BLOCK_N)
         col_valid = offs_n < seqlen
         if True:
