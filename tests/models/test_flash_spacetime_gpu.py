@@ -48,6 +48,10 @@ pytestmark = pytest.mark.skipif(
 # E-dependent output; the no-bias configuration keeps the strict floor.
 ATOL = {torch.float32: 1e-6, torch.bfloat16: 1e-2}
 ATOL_FP32_WITH_E = 5e-3
+# Machine epsilon per comparison dtype for the scale-aware elementwise
+# floor (bf16 has an 8-bit mantissa: rounding sites legitimately differ
+# between two correct pipelines by a few output-scale ulps).
+ULP = {torch.bfloat16: 2.0**-8}
 
 
 def _atol(dtype: torch.dtype, flags: Tuple[bool, bool]) -> float:
@@ -136,12 +140,23 @@ def _assert_2x_rule(
 ) -> None:
     kernel_err = (kernel_out.double() - fp64_ref)[valid].abs()
     eager_err = (dtype_ref.double() - fp64_ref)[valid].abs()
-    bound = 2.0 * eager_err + atol
+    # The elementwise floor is scale-aware for low-precision dtypes: the
+    # kernel rounds at different sites than eager (it keeps S and P in
+    # fp32 and rounds once), so at any single element it may sit a few
+    # output-scale ulps away while being at least as accurate overall —
+    # which the aggregate assertion below enforces.
+    ulp = ULP.get(kernel_out.dtype, 0.0)
+    floor = atol + 4.0 * ulp * fp64_ref[valid].abs().clamp(min=1.0)
+    bound = 2.0 * eager_err + floor
     bad = kernel_err > bound
     assert not bad.any(), (
         f"{what}: {int(bad.sum())} elements exceed the 2x-eager bound; "
         f"worst kernel err {kernel_err.max():.3e} vs bound "
         f"{bound[kernel_err.argmax()]:.3e}"
+    )
+    assert kernel_err.mean() <= 1.5 * eager_err.mean() + atol, (
+        f"{what}: kernel mean error {kernel_err.mean():.3e} exceeds "
+        f"1.5x eager mean {eager_err.mean():.3e}"
     )
 
 
