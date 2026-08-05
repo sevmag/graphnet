@@ -83,11 +83,14 @@ def _e_chunk(
     C_CHUNK: tl.constexpr,
     CDTYPE: tl.constexpr,
 ) -> tl.tensor:
-    """One channel chunk of E: sin for gc < F, cos above -> [M, N, CC]."""
+    """One channel chunk of E: sin for gc < F, cos above -> [M, CC, N]."""
     gc = BASE + tl.arange(0, C_CHUNK)
     f = tl.load(freq_ptr + gc % F_)
-    theta = x[:, :, None] * f[None, None, :]
-    return tl.where((gc < F_)[None, None, :], tl.sin(theta), tl.cos(theta)).to(
+    # Channel-major layout ([M, CC, N]): every logit-side dot consumes E in
+    # this orientation, so no E tensor is ever transposed; the value-side
+    # dots transpose the much smaller P tile instead.
+    theta = x[:, None, :] * f[None, :, None]
+    return tl.where((gc < F_)[None, :, None], tl.sin(theta), tl.cos(theta)).to(
         CDTYPE
     )
 
@@ -181,9 +184,11 @@ def flash_spacetime_fwd_kernel(
     acc1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
     acc2 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
     if USE_ACT_BIAS:
-        ae0 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
-        ae1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
-        ae2 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
+        # Held transposed ([M, CC, G]) to match channel-major E; the
+        # epilogue store flips them back once.
+        ae0 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
+        ae1 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
+        ae2 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
     m_run = tl.full((BLOCK_M, G_PAD), float("-inf"), dtype=tl.float32)
     l_run = tl.zeros((BLOCK_M, G_PAD), dtype=tl.float32)
 
@@ -256,21 +261,9 @@ def flash_spacetime_fwd_kernel(
 
             if USE_ATTN_BIAS:
                 # sum_e u_e E_e, batched over rows: [M,G,CC] @ [M,CC,N].
-                sb = tl.dot(
-                    u0,
-                    tl.trans(e0, 0, 2, 1),
-                    input_precision=INPUT_PRECISION,
-                )
-                sb += tl.dot(
-                    u1,
-                    tl.trans(e1, 0, 2, 1),
-                    input_precision=INPUT_PRECISION,
-                )
-                sb += tl.dot(
-                    u2,
-                    tl.trans(e2, 0, 2, 1),
-                    input_precision=INPUT_PRECISION,
-                )
+                sb = tl.dot(u0, e0, input_precision=INPUT_PRECISION)
+                sb += tl.dot(u1, e1, input_precision=INPUT_PRECISION)
+                sb += tl.dot(u2, e2, input_precision=INPUT_PRECISION)
                 s += tl.trans(sb, 1, 0, 2)  # [M,G,N] -> [G,M,N]
 
             # One-sided masking only: this CTA's valid rows never see the
@@ -335,14 +328,15 @@ def flash_spacetime_fwd_kernel(
                 2,
             )
             if USE_ACT_BIAS:
-                ae0 = ae0 * alpha[:, :, None] + tl.dot(
-                    pb, e0, input_precision=INPUT_PRECISION
+                pbt_c = tl.trans(pb, 0, 2, 1)  # [M, N, G]
+                ae0 = ae0 * alpha[:, None, :] + tl.dot(
+                    e0, pbt_c, input_precision=INPUT_PRECISION
                 )
-                ae1 = ae1 * alpha[:, :, None] + tl.dot(
-                    pb, e1, input_precision=INPUT_PRECISION
+                ae1 = ae1 * alpha[:, None, :] + tl.dot(
+                    e1, pbt_c, input_precision=INPUT_PRECISION
                 )
-                ae2 = ae2 * alpha[:, :, None] + tl.dot(
-                    pb, e2, input_precision=INPUT_PRECISION
+                ae2 = ae2 * alpha[:, None, :] + tl.dot(
+                    e2, pbt_c, input_precision=INPUT_PRECISION
                 )
 
     l_safe = tl.where(l_run == 0.0, 1.0, l_run)
@@ -351,9 +345,21 @@ def flash_spacetime_fwd_kernel(
     tl.store(o1_ptr + row_off + 1 * C_CHUNK, acc1 * inv_l, mask=row_mask)
     tl.store(o1_ptr + row_off + 2 * C_CHUNK, acc2 * inv_l, mask=row_mask)
     if USE_ACT_BIAS:
-        tl.store(ae_ptr + row_off + 0 * C_CHUNK, ae0 * inv_l, mask=row_mask)
-        tl.store(ae_ptr + row_off + 1 * C_CHUNK, ae1 * inv_l, mask=row_mask)
-        tl.store(ae_ptr + row_off + 2 * C_CHUNK, ae2 * inv_l, mask=row_mask)
+        tl.store(
+            ae_ptr + row_off + 0 * C_CHUNK,
+            tl.trans(ae0, 0, 2, 1) * inv_l,
+            mask=row_mask,
+        )
+        tl.store(
+            ae_ptr + row_off + 1 * C_CHUNK,
+            tl.trans(ae1, 0, 2, 1) * inv_l,
+            mask=row_mask,
+        )
+        tl.store(
+            ae_ptr + row_off + 2 * C_CHUNK,
+            tl.trans(ae2, 0, 2, 1) * inv_l,
+            mask=row_mask,
+        )
     lse = m_run + tl.log(l_safe)
     lse_off = (b * H + offs_g[None, :]) * L + offs_m[:, None]
     tl.store(

@@ -86,13 +86,9 @@ def _recompute_p_ds(
         input_precision=INPUT_PRECISION,
     )  # [G, M, N]
     if USE_ATTN_BIAS:
-        sb = tl.dot(u0, tl.trans(e0, 0, 2, 1), input_precision=INPUT_PRECISION)
-        sb += tl.dot(
-            u1, tl.trans(e1, 0, 2, 1), input_precision=INPUT_PRECISION
-        )
-        sb += tl.dot(
-            u2, tl.trans(e2, 0, 2, 1), input_precision=INPUT_PRECISION
-        )
+        sb = tl.dot(u0, e0, input_precision=INPUT_PRECISION)
+        sb += tl.dot(u1, e1, input_precision=INPUT_PRECISION)
+        sb += tl.dot(u2, e2, input_precision=INPUT_PRECISION)
         s += tl.trans(sb, 1, 0, 2)
     s = tl.trans(s, 1, 0, 2)  # [M, G, N]
 
@@ -122,15 +118,9 @@ def _recompute_p_ds(
         2,
     )  # [M, G, N]
     if USE_ACT_BIAS:
-        wb = tl.dot(
-            wt0, tl.trans(e0, 0, 2, 1), input_precision=INPUT_PRECISION
-        )
-        wb += tl.dot(
-            wt1, tl.trans(e1, 0, 2, 1), input_precision=INPUT_PRECISION
-        )
-        wb += tl.dot(
-            wt2, tl.trans(e2, 0, 2, 1), input_precision=INPUT_PRECISION
-        )
+        wb = tl.dot(wt0, e0, input_precision=INPUT_PRECISION)
+        wb += tl.dot(wt1, e1, input_precision=INPUT_PRECISION)
+        wb += tl.dot(wt2, e2, input_precision=INPUT_PRECISION)
         dpr += wb + dob[:, :, None]
 
     ds = p * (dpr - dl[:, :, None])
@@ -317,7 +307,7 @@ def flash_spacetime_bwd_cols_kernel(
                 e1 = _e_chunk(x, freq_ptr, 1 * C_CHUNK, F_, C_CHUNK, CDTYPE)
                 e2 = _e_chunk(x, freq_ptr, 2 * C_CHUNK, F_, C_CHUNK, CDTYPE)
             else:
-                e0 = tl.zeros((BLOCK_M, BLOCK_N, C_CHUNK), dtype=CDTYPE)
+                e0 = tl.zeros((BLOCK_M, C_CHUNK, BLOCK_N), dtype=CDTYPE)
                 e1 = e0
                 e2 = e0
 
@@ -541,14 +531,14 @@ def flash_spacetime_bwd_rows_kernel(
     dqp1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
     dqp2 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
     if USE_ATTN_BIAS:
-        h0 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
-        h1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
-        h2 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
+        h0 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
+        h1 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
+        h2 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
         sig = tl.zeros((BLOCK_M, G_PAD), dtype=tl.float32)
     if USE_ACT_BIAS:
-        g0 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
-        g1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
-        g2 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
+        g0 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
+        g1 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
+        g2 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
 
     for n0 in range(0, L, BLOCK_N):
         offs_n = n0 + tl.arange(0, BLOCK_N)
@@ -601,7 +591,7 @@ def flash_spacetime_bwd_rows_kernel(
                 e1 = _e_chunk(x, freq_ptr, 1 * C_CHUNK, F_, C_CHUNK, CDTYPE)
                 e2 = _e_chunk(x, freq_ptr, 2 * C_CHUNK, F_, C_CHUNK, CDTYPE)
             else:
-                e0 = tl.zeros((BLOCK_M, BLOCK_N, C_CHUNK), dtype=CDTYPE)
+                e0 = tl.zeros((BLOCK_M, C_CHUNK, BLOCK_N), dtype=CDTYPE)
                 e1 = e0
                 e2 = e0
 
@@ -666,27 +656,53 @@ def flash_spacetime_bwd_rows_kernel(
             )
             if USE_ATTN_BIAS:
                 # H += dS·E (batched over rows), sigma += rowsum(dS).
-                h0 += tl.dot(dscd, e0, input_precision=INPUT_PRECISION)
-                h1 += tl.dot(dscd, e1, input_precision=INPUT_PRECISION)
-                h2 += tl.dot(dscd, e2, input_precision=INPUT_PRECISION)
+                dst_c = tl.trans(dscd, 0, 2, 1)  # [M, N, G]
+                h0 += tl.dot(e0, dst_c, input_precision=INPUT_PRECISION)
+                h1 += tl.dot(e1, dst_c, input_precision=INPUT_PRECISION)
+                h2 += tl.dot(e2, dst_c, input_precision=INPUT_PRECISION)
                 sig += tl.sum(ds, axis=2)
             if USE_ACT_BIAS:
-                g0 += tl.dot(pcd, e0, input_precision=INPUT_PRECISION)
-                g1 += tl.dot(pcd, e1, input_precision=INPUT_PRECISION)
-                g2 += tl.dot(pcd, e2, input_precision=INPUT_PRECISION)
+                pct_c = tl.trans(pcd, 0, 2, 1)
+                g0 += tl.dot(e0, pct_c, input_precision=INPUT_PRECISION)
+                g1 += tl.dot(e1, pct_c, input_precision=INPUT_PRECISION)
+                g2 += tl.dot(e2, pct_c, input_precision=INPUT_PRECISION)
 
     tl.store(dqp_ptr + row_off + 0 * C_CHUNK, dqp0, mask=row_mask)
     tl.store(dqp_ptr + row_off + 1 * C_CHUNK, dqp1, mask=row_mask)
     tl.store(dqp_ptr + row_off + 2 * C_CHUNK, dqp2, mask=row_mask)
     if USE_ATTN_BIAS:
-        tl.store(hacc_ptr + row_off + 0 * C_CHUNK, h0, mask=row_mask)
-        tl.store(hacc_ptr + row_off + 1 * C_CHUNK, h1, mask=row_mask)
-        tl.store(hacc_ptr + row_off + 2 * C_CHUNK, h2, mask=row_mask)
+        tl.store(
+            hacc_ptr + row_off + 0 * C_CHUNK,
+            tl.trans(h0, 0, 2, 1),
+            mask=row_mask,
+        )
+        tl.store(
+            hacc_ptr + row_off + 1 * C_CHUNK,
+            tl.trans(h1, 0, 2, 1),
+            mask=row_mask,
+        )
+        tl.store(
+            hacc_ptr + row_off + 2 * C_CHUNK,
+            tl.trans(h2, 0, 2, 1),
+            mask=row_mask,
+        )
         tl.store(sig_ptr + row_vec, sig, mask=row_vec_mask)
     if USE_ACT_BIAS:
-        tl.store(gacc_ptr + row_off + 0 * C_CHUNK, g0, mask=row_mask)
-        tl.store(gacc_ptr + row_off + 1 * C_CHUNK, g1, mask=row_mask)
-        tl.store(gacc_ptr + row_off + 2 * C_CHUNK, g2, mask=row_mask)
+        tl.store(
+            gacc_ptr + row_off + 0 * C_CHUNK,
+            tl.trans(g0, 0, 2, 1),
+            mask=row_mask,
+        )
+        tl.store(
+            gacc_ptr + row_off + 1 * C_CHUNK,
+            tl.trans(g1, 0, 2, 1),
+            mask=row_mask,
+        )
+        tl.store(
+            gacc_ptr + row_off + 2 * C_CHUNK,
+            tl.trans(g2, 0, 2, 1),
+            mask=row_mask,
+        )
 
 
 def flash_spacetime_backward(
