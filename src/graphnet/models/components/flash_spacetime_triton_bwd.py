@@ -167,10 +167,12 @@ def flash_spacetime_bwd_cols_kernel(
     b = tl.program_id(1)
     n0 = pid_n * BLOCK_N
 
+    seqlen = tl.load(seqlen_ptr + b)
+    if n0 >= seqlen:
+        return
     offs_n = n0 + tl.arange(0, BLOCK_N)
     offs_g = tl.arange(0, G_PAD)
     offs_cc = tl.arange(0, C_CHUNK)
-    seqlen = tl.load(seqlen_ptr + b)
     col_valid = offs_n < seqlen
     head_live = offs_g < H
 
@@ -451,10 +453,12 @@ def flash_spacetime_bwd_rows_kernel(
     b = tl.program_id(1)
     m0 = pid_m * BLOCK_M
 
+    seqlen = tl.load(seqlen_ptr + b)
+    if m0 >= seqlen:
+        return
     offs_m = m0 + tl.arange(0, BLOCK_M)
     offs_g = tl.arange(0, G_PAD)
     offs_cc = tl.arange(0, C_CHUNK)
-    seqlen = tl.load(seqlen_ptr + b)
     row_valid = offs_m < seqlen
     head_live = offs_g < H
 

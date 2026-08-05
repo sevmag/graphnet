@@ -137,10 +137,15 @@ def flash_spacetime_fwd_kernel(
     b = tl.program_id(1)
     m0 = pid_m * BLOCK_M
 
+    seqlen = tl.load(seqlen_ptr + b)
+    # Whole-block early exit: outputs are zero-initialised on the host, so
+    # row blocks entirely inside the padding write nothing at all. Without
+    # this, long-L padded batches pay O(L * max_len) dead tile loops.
+    if m0 >= seqlen:
+        return
     offs_m = m0 + tl.arange(0, BLOCK_M)
     offs_g = tl.arange(0, G_PAD)
     offs_cc = tl.arange(0, C_CHUNK)
-    seqlen = tl.load(seqlen_ptr + b)
     row_valid = offs_m < seqlen
     head_live = offs_g < H
 
