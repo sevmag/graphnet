@@ -706,6 +706,7 @@ def flash_spacetime_backward(
     block_m: int = 16,
     block_n: int = 16,
     num_warps: int = 8,
+    num_stages: int = 1,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
     """Deterministic backward; returns (dq, dk, dv, dW, db)."""
     batch, heads, length, dim = q.shape
@@ -769,7 +770,7 @@ def flash_spacetime_backward(
         INPUT_SCALE=SINEMB_INPUT_SCALE,
         CLIP=SINEMB_CLIP,
         num_warps=num_warps,
-        num_stages=1,
+        num_stages=num_stages,
     )
     flash_spacetime_bwd_cols_kernel[(triton.cdiv(length, block_n), batch)](
         qc,

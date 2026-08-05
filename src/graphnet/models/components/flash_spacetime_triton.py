@@ -384,6 +384,7 @@ def flash_spacetime_forward(
     block_m: int = 16,
     block_n: Optional[int] = None,
     num_warps: int = 8,
+    num_stages: int = 1,
     skip_empty_tiles: bool = True,
 ) -> Tuple[Tensor, Tensor]:
     """Fused forward. Returns (O [B,H,L,D] with pad rows zeroed, LSE).
@@ -465,7 +466,7 @@ def flash_spacetime_forward(
         INPUT_SCALE=SINEMB_INPUT_SCALE,
         CLIP=SINEMB_CLIP,
         num_warps=num_warps,
-        num_stages=1,
+        num_stages=num_stages,
     )
 
     out = o1
