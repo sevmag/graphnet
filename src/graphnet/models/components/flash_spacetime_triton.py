@@ -80,13 +80,14 @@ def _e_chunk(
     BASE: tl.constexpr,
     F_: tl.constexpr,
     C_CHUNK: tl.constexpr,
+    CDTYPE: tl.constexpr,
 ) -> tl.tensor:
-    """One channel chunk of E: sin for gc < F, cos above -> [M, N, CC] bf16."""
+    """One channel chunk of E: sin for gc < F, cos above -> [M, N, CC]."""
     gc = BASE + tl.arange(0, C_CHUNK)
     f = tl.load(freq_ptr + gc % F_)
     theta = x[:, :, None] * f[None, None, :]
     return tl.where((gc < F_)[None, None, :], tl.sin(theta), tl.cos(theta)).to(
-        tl.bfloat16
+        CDTYPE
     )
 
 
@@ -115,6 +116,8 @@ def flash_spacetime_fwd_kernel(
     F_: tl.constexpr,
     USE_ATTN_BIAS: tl.constexpr,
     USE_ACT_BIAS: tl.constexpr,
+    CDTYPE: tl.constexpr,
+    INPUT_PRECISION: tl.constexpr,
     TIME_SCALE_C: tl.constexpr,
     INPUT_SCALE: tl.constexpr,
     CLIP: tl.constexpr,
@@ -143,7 +146,7 @@ def flash_spacetime_fwd_kernel(
         & c_live[None, None, :]
     )
     qt = tl.load(q_ptr + qkv_off, mask=load_mask, other=0.0) * scale
-    qt = qt.to(tl.bfloat16)
+    qt = qt.to(CDTYPE)
     if USE_ATTN_BIAS:
         # u in C_CHUNK slices: register tensors cannot be range-sliced, so
         # the chunks are separate loads from the same [B, H, L, C] buffer.
@@ -152,13 +155,13 @@ def flash_spacetime_fwd_kernel(
         ) * C_ + tl.arange(0, C_CHUNK)[None, None, :]
         u_mask = row_valid[:, None, None] & head_live[None, :, None]
         u0 = tl.load(u_ptr + u_off + 0 * C_CHUNK, mask=u_mask, other=0.0).to(
-            tl.bfloat16
+            CDTYPE
         )
         u1 = tl.load(u_ptr + u_off + 1 * C_CHUNK, mask=u_mask, other=0.0).to(
-            tl.bfloat16
+            CDTYPE
         )
         u2 = tl.load(u_ptr + u_off + 2 * C_CHUNK, mask=u_mask, other=0.0).to(
-            tl.bfloat16
+            CDTYPE
         )
 
     feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
@@ -191,16 +194,16 @@ def flash_spacetime_fwd_kernel(
                 & c_live[None, None, :]
             )
             k = tl.load(k_ptr + kv_off, mask=kv_mask, other=0.0).to(
-                tl.bfloat16
+                CDTYPE
             )  # [N, G, C]
-            v = tl.load(v_ptr + kv_off, mask=kv_mask, other=0.0).to(
-                tl.bfloat16
-            )
+            v = tl.load(v_ptr + kv_off, mask=kv_mask, other=0.0).to(CDTYPE)
 
             # [M, G, C] @ [G was batch]: QK per head — batch dim must lead.
             # Rearrange to [G, M, C] x [G, C, N].
             s = tl.dot(
-                tl.trans(qt, 1, 0, 2), tl.trans(k, 1, 2, 0)
+                tl.trans(qt, 1, 0, 2),
+                tl.trans(k, 1, 2, 0),
+                input_precision=INPUT_PRECISION,
             )  # [G, M, N] fp32 accum
 
             if USE_ATTN_BIAS or USE_ACT_BIAS:
@@ -225,15 +228,27 @@ def flash_spacetime_fwd_kernel(
                     INPUT_SCALE,
                     CLIP,
                 )  # [M, N]
-                e0 = _e_chunk(x, freq_ptr, 0 * C_CHUNK, F_, C_CHUNK)
-                e1 = _e_chunk(x, freq_ptr, 1 * C_CHUNK, F_, C_CHUNK)
-                e2 = _e_chunk(x, freq_ptr, 2 * C_CHUNK, F_, C_CHUNK)
+                e0 = _e_chunk(x, freq_ptr, 0 * C_CHUNK, F_, C_CHUNK, CDTYPE)
+                e1 = _e_chunk(x, freq_ptr, 1 * C_CHUNK, F_, C_CHUNK, CDTYPE)
+                e2 = _e_chunk(x, freq_ptr, 2 * C_CHUNK, F_, C_CHUNK, CDTYPE)
 
             if USE_ATTN_BIAS:
                 # sum_e u_e E_e, batched over rows: [M,G,CC] @ [M,CC,N].
-                sb = tl.dot(u0, tl.trans(e0, 0, 2, 1))
-                sb += tl.dot(u1, tl.trans(e1, 0, 2, 1))
-                sb += tl.dot(u2, tl.trans(e2, 0, 2, 1))
+                sb = tl.dot(
+                    u0,
+                    tl.trans(e0, 0, 2, 1),
+                    input_precision=INPUT_PRECISION,
+                )
+                sb += tl.dot(
+                    u1,
+                    tl.trans(e1, 0, 2, 1),
+                    input_precision=INPUT_PRECISION,
+                )
+                sb += tl.dot(
+                    u2,
+                    tl.trans(e2, 0, 2, 1),
+                    input_precision=INPUT_PRECISION,
+                )
                 s += tl.trans(sb, 1, 0, 2)  # [M,G,N] -> [G,M,N]
 
             # One-sided masking only: this CTA's valid rows never see the
@@ -252,17 +267,30 @@ def flash_spacetime_fwd_kernel(
             )
             l_run = l_run * alpha + tl.sum(p, axis=2)
             m_run = m_new
-            pb = p.to(tl.bfloat16)
+            pb = p.to(CDTYPE)
 
             acc_v = acc_v * alpha[:, :, None]
             # [M,G,N] @ [M?]: P@V per head: [G,M,N]@[G,N,C].
             acc_v += tl.trans(
-                tl.dot(tl.trans(pb, 1, 0, 2), tl.trans(v, 1, 0, 2)), 1, 0, 2
+                tl.dot(
+                    tl.trans(pb, 1, 0, 2),
+                    tl.trans(v, 1, 0, 2),
+                    input_precision=INPUT_PRECISION,
+                ),
+                1,
+                0,
+                2,
             )
             if USE_ACT_BIAS:
-                ae0 = ae0 * alpha[:, :, None] + tl.dot(pb, e0)
-                ae1 = ae1 * alpha[:, :, None] + tl.dot(pb, e1)
-                ae2 = ae2 * alpha[:, :, None] + tl.dot(pb, e2)
+                ae0 = ae0 * alpha[:, :, None] + tl.dot(
+                    pb, e0, input_precision=INPUT_PRECISION
+                )
+                ae1 = ae1 * alpha[:, :, None] + tl.dot(
+                    pb, e1, input_precision=INPUT_PRECISION
+                )
+                ae2 = ae2 * alpha[:, :, None] + tl.dot(
+                    pb, e2, input_precision=INPUT_PRECISION
+                )
 
     l_safe = tl.where(l_run == 0.0, 1.0, l_run)
     out_mask = load_mask
@@ -321,7 +349,7 @@ def flash_spacetime_forward(
     use_attn_bias: bool = True,
     use_activation_bias: bool = True,
     block_m: int = 16,
-    block_n: int = 32,
+    block_n: Optional[int] = None,
     num_warps: int = 8,
 ) -> Tuple[Tensor, Tensor]:
     """Fused forward. Returns (O [B,H,L,D] with pad rows zeroed, LSE).
@@ -339,6 +367,12 @@ def flash_spacetime_forward(
         raise ValueError(f"kernel supports C = 48 only, got {c}")
     scale_value = dim**-0.5 if scale is None else scale
 
+    # fp32 inputs compute in true fp32 (ieee dots) to honour the
+    # 2x-eager-error contract; bf16 inputs use bf16 tensor-core math. fp32
+    # operands double the tile staging, so the key-block shrinks.
+    compute_bf16 = q.dtype != torch.float32
+    if block_n is None:
+        block_n = 32 if compute_bf16 else 16
     qc, kc, vc = (t.contiguous() for t in (q, k, v))
     featsc = feats[..., :4].to(torch.float32).contiguous()
     freqs = sinusoidal_frequencies(c, q.device)
@@ -352,13 +386,13 @@ def flash_spacetime_forward(
     else:
         u = qc  # dummy pointer, never read
 
-    o1 = torch.empty_like(qc)
+    o1 = torch.zeros_like(qc)
     ae = (
-        torch.empty(batch, heads, length, c, device=q.device, dtype=q.dtype)
+        torch.zeros(batch, heads, length, c, device=q.device, dtype=q.dtype)
         if use_activation_bias
         else qc  # dummy pointer, never written
     )
-    lse = torch.empty(
+    lse = torch.zeros(
         batch, heads, length, device=q.device, dtype=torch.float32
     )
 
@@ -387,6 +421,8 @@ def flash_spacetime_forward(
         F_=c // 2,
         USE_ATTN_BIAS=use_attn_bias,
         USE_ACT_BIAS=use_activation_bias,
+        CDTYPE=tl.bfloat16 if compute_bf16 else tl.float32,
+        INPUT_PRECISION="ieee",
         TIME_SCALE_C=TIME_SCALE,
         INPUT_SCALE=SINEMB_INPUT_SCALE,
         CLIP=SINEMB_CLIP,
