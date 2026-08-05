@@ -143,6 +143,7 @@ def flash_spacetime_bwd_cols_kernel(
     dob_ptr: tl.tensor,
     dk_ptr: tl.tensor,
     dv_ptr: tl.tensor,
+    cu_ptr: tl.tensor,  # [B+1] token offsets (PACKED only)
     freq_ptr: tl.tensor,
     scale: float,
     L: tl.constexpr,
@@ -156,6 +157,7 @@ def flash_spacetime_bwd_cols_kernel(
     F_: tl.constexpr,
     USE_ATTN_BIAS: tl.constexpr,
     USE_ACT_BIAS: tl.constexpr,
+    PACKED: tl.constexpr,
     CDTYPE: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
     TIME_SCALE_C: tl.constexpr,
@@ -170,15 +172,24 @@ def flash_spacetime_bwd_cols_kernel(
     seqlen = tl.load(seqlen_ptr + b)
     if n0 >= seqlen:
         return
+    if PACKED:
+        tok0 = tl.load(cu_ptr + b)
+    else:
+        tok0 = 0
     offs_n = n0 + tl.arange(0, BLOCK_N)
     offs_g = tl.arange(0, G_PAD)
     offs_cc = tl.arange(0, C_CHUNK)
     col_valid = offs_n < seqlen
     head_live = offs_g < H
 
-    col_off = (
-        (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
-    ) * C_ + offs_cc[None, None, :]
+    if PACKED:
+        col_off = (
+            (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
+        ) * C_ + offs_cc[None, None, :]
+    else:
+        col_off = (
+            (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
+        ) * C_ + offs_cc[None, None, :]
     col_mask = col_valid[:, None, None] & head_live[None, :, None]
     k0 = tl.load(k_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0).to(
         CDTYPE
@@ -199,7 +210,10 @@ def flash_spacetime_bwd_cols_kernel(
         CDTYPE
     )
 
-    feats_j = feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
+    if PACKED:
+        feats_j = feats_ptr + (tok0 + offs_n) * FEAT_STRIDE
+    else:
+        feats_j = feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
     pjx = tl.load(feats_j + 0, mask=col_valid, other=0.0)
     pjy = tl.load(feats_j + 1, mask=col_valid, other=0.0)
     pjz = tl.load(feats_j + 2, mask=col_valid, other=0.0)
@@ -212,13 +226,18 @@ def flash_spacetime_bwd_cols_kernel(
     dv1 = tl.zeros((BLOCK_N, G_PAD, C_CHUNK), dtype=tl.float32)
     dv2 = tl.zeros((BLOCK_N, G_PAD, C_CHUNK), dtype=tl.float32)
 
-    for m0 in range(0, L, BLOCK_M):
+    for m0 in range(0, seqlen, BLOCK_M):
         offs_m = m0 + tl.arange(0, BLOCK_M)
         row_valid = offs_m < seqlen
-        if m0 < seqlen:
-            row_off = (
-                (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
-            ) * C_ + offs_cc[None, None, :]
+        if True:
+            if PACKED:
+                row_off = (
+                    (tok0 + offs_m[:, None, None]) * H + offs_g[None, :, None]
+                ) * C_ + offs_cc[None, None, :]
+            else:
+                row_off = (
+                    (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
+                ) * C_ + offs_cc[None, None, :]
             row_mask = row_valid[:, None, None] & head_live[None, :, None]
             qt0 = (
                 tl.load(
@@ -276,7 +295,10 @@ def flash_spacetime_bwd_cols_kernel(
                 wt1 = qt1
                 wt2 = qt2
 
-            row_vec = (b * H + offs_g[None, :]) * L + offs_m[:, None]
+            if PACKED:
+                row_vec = (tok0 + offs_m[:, None]) * H + offs_g[None, :]
+            else:
+                row_vec = (b * H + offs_g[None, :]) * L + offs_m[:, None]
             row_vec_mask = row_valid[:, None] & head_live[None, :]
             lse = tl.load(lse_ptr + row_vec, mask=row_vec_mask, other=0.0)
             dl = tl.load(dl_ptr + row_vec, mask=row_vec_mask, other=0.0)
@@ -285,7 +307,12 @@ def flash_spacetime_bwd_cols_kernel(
             else:
                 dob = lse * 0.0
 
-            feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
+            if PACKED:
+                feats_i = feats_ptr + (tok0 + offs_m) * FEAT_STRIDE
+            else:
+                feats_i = (
+                    feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
+                )
             pix = tl.load(feats_i + 0, mask=row_valid, other=0.0)
             piy = tl.load(feats_i + 1, mask=row_valid, other=0.0)
             piz = tl.load(feats_i + 2, mask=row_valid, other=0.0)
@@ -413,7 +440,10 @@ def flash_spacetime_bwd_cols_kernel(
 
 
 @triton.jit
-def flash_spacetime_bwd_rows_kernel(
+def flash_spacetime_bwd_rows_kernel(  # noqa: C901
+    # The cyclomatic count is compile-time constexpr specialization
+    # (PACKED / bias-flag branches Triton resolves before codegen), not
+    # runtime control flow.
     q_ptr: tl.tensor,
     k_ptr: tl.tensor,
     v_ptr: tl.tensor,
@@ -429,6 +459,7 @@ def flash_spacetime_bwd_rows_kernel(
     hacc_ptr: tl.tensor,
     gacc_ptr: tl.tensor,
     sig_ptr: tl.tensor,
+    cu_ptr: tl.tensor,  # [B+1] token offsets (PACKED only)
     freq_ptr: tl.tensor,
     scale: float,
     L: tl.constexpr,
@@ -442,6 +473,7 @@ def flash_spacetime_bwd_rows_kernel(
     F_: tl.constexpr,
     USE_ATTN_BIAS: tl.constexpr,
     USE_ACT_BIAS: tl.constexpr,
+    PACKED: tl.constexpr,
     CDTYPE: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
     TIME_SCALE_C: tl.constexpr,
@@ -456,15 +488,24 @@ def flash_spacetime_bwd_rows_kernel(
     seqlen = tl.load(seqlen_ptr + b)
     if m0 >= seqlen:
         return
+    if PACKED:
+        tok0 = tl.load(cu_ptr + b)
+    else:
+        tok0 = 0
     offs_m = m0 + tl.arange(0, BLOCK_M)
     offs_g = tl.arange(0, G_PAD)
     offs_cc = tl.arange(0, C_CHUNK)
     row_valid = offs_m < seqlen
     head_live = offs_g < H
 
-    row_off = (
-        (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
-    ) * C_ + offs_cc[None, None, :]
+    if PACKED:
+        row_off = (
+            (tok0 + offs_m[:, None, None]) * H + offs_g[None, :, None]
+        ) * C_ + offs_cc[None, None, :]
+    else:
+        row_off = (
+            (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
+        ) * C_ + offs_cc[None, None, :]
     row_mask = row_valid[:, None, None] & head_live[None, :, None]
     qt0 = (
         tl.load(q_ptr + row_off + 0 * C_CHUNK, mask=row_mask, other=0.0)
@@ -516,7 +557,10 @@ def flash_spacetime_bwd_rows_kernel(
         wt1 = qt1
         wt2 = qt2
 
-    row_vec = (b * H + offs_g[None, :]) * L + offs_m[:, None]
+    if PACKED:
+        row_vec = (tok0 + offs_m[:, None]) * H + offs_g[None, :]
+    else:
+        row_vec = (b * H + offs_g[None, :]) * L + offs_m[:, None]
     row_vec_mask = row_valid[:, None] & head_live[None, :]
     lse = tl.load(lse_ptr + row_vec, mask=row_vec_mask, other=0.0)
     dl = tl.load(dl_ptr + row_vec, mask=row_vec_mask, other=0.0)
@@ -525,7 +569,10 @@ def flash_spacetime_bwd_rows_kernel(
     else:
         dob = lse * 0.0
 
-    feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
+    if PACKED:
+        feats_i = feats_ptr + (tok0 + offs_m) * FEAT_STRIDE
+    else:
+        feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
     pix = tl.load(feats_i + 0, mask=row_valid, other=0.0)
     piy = tl.load(feats_i + 1, mask=row_valid, other=0.0)
     piz = tl.load(feats_i + 2, mask=row_valid, other=0.0)
@@ -544,13 +591,18 @@ def flash_spacetime_bwd_rows_kernel(
         g1 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
         g2 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
 
-    for n0 in range(0, L, BLOCK_N):
+    for n0 in range(0, seqlen, BLOCK_N):
         offs_n = n0 + tl.arange(0, BLOCK_N)
         col_valid = offs_n < seqlen
-        if n0 < seqlen:
-            col_off = (
-                (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
-            ) * C_ + offs_cc[None, None, :]
+        if True:
+            if PACKED:
+                col_off = (
+                    (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
+                ) * C_ + offs_cc[None, None, :]
+            else:
+                col_off = (
+                    (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
+                ) * C_ + offs_cc[None, None, :]
             col_mask = col_valid[:, None, None] & head_live[None, :, None]
             k0 = tl.load(
                 k_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0
@@ -571,7 +623,12 @@ def flash_spacetime_bwd_rows_kernel(
                 v_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
             ).to(CDTYPE)
 
-            feats_j = feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
+            if PACKED:
+                feats_j = feats_ptr + (tok0 + offs_n) * FEAT_STRIDE
+            else:
+                feats_j = (
+                    feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
+                )
             pjx = tl.load(feats_j + 0, mask=col_valid, other=0.0)
             pjy = tl.load(feats_j + 1, mask=col_valid, other=0.0)
             pjz = tl.load(feats_j + 2, mask=col_valid, other=0.0)
@@ -727,19 +784,34 @@ def flash_spacetime_backward(
     block_n: int = 16,
     num_warps: int = 8,
     num_stages: int = 1,
+    cu_seqlens: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
-    """Deterministic backward; returns (dq, dk, dv, dW, db)."""
-    batch, heads, length, dim = q.shape
+    """Deterministic backward; returns (dq, dk, dv, dW, db).
+
+    With `cu_seqlens` the tensors are packed [T, H, D] (see the forward);
+    every row is a real token, so no upstream-gradient masking exists.
+    """
+    packed = cu_seqlens is not None
+    if cu_seqlens is not None:
+        cu = cu_seqlens.to(torch.int32).contiguous()
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        batch = int(seqlens.numel())
+        _, heads, dim = q.shape
+        length = int(seqlens.max())
+        do = grad_out.contiguous()
+    else:
+        batch, heads, length, dim = q.shape
     scale_value = dim**-0.5 if scale is None else scale
     compute_bf16 = q.dtype != torch.float32
     fp = torch.float32
 
-    valid = torch.arange(length, device=q.device).unsqueeze(
-        0
-    ) < seqlens.unsqueeze(1)
-    # The op's pad-row outputs are the constant zero, so upstream grads
-    # there are discardable regardless of caller garbage.
-    do = (grad_out * valid[:, None, :, None]).contiguous()
+    if not packed:
+        valid = torch.arange(length, device=q.device).unsqueeze(
+            0
+        ) < seqlens.unsqueeze(1)
+        # The op's pad-row outputs are the constant zero, so upstream
+        # grads there are discardable regardless of caller garbage.
+        do = (grad_out * valid[:, None, :, None]).contiguous()
     qc, kc, vc = (t.contiguous() for t in (q, k, v))
     featsc = feats[..., :4].to(torch.float32).contiguous()
     freqs = sinusoidal_frequencies(dim, q.device)
@@ -771,6 +843,7 @@ def flash_spacetime_backward(
     sig = torch.zeros_like(dl) if use_attn_bias else dl
 
     seq32 = seqlens.to(torch.int32).contiguous()
+    cu32 = cu if packed else seq32
     common = dict(
         scale=scale_value,
         L=length,
@@ -784,6 +857,7 @@ def flash_spacetime_backward(
         F_=dim // 2,
         USE_ATTN_BIAS=use_attn_bias,
         USE_ACT_BIAS=use_activation_bias,
+        PACKED=packed,
         CDTYPE=tl.bfloat16 if compute_bf16 else tl.float32,
         INPUT_PRECISION="ieee",
         TIME_SCALE_C=TIME_SCALE,
@@ -806,6 +880,7 @@ def flash_spacetime_backward(
         dob,
         dk,
         dv,
+        cu32,
         freqs,
         **common,
     )
@@ -825,6 +900,7 @@ def flash_spacetime_backward(
         hacc,
         gacc,
         sig,
+        cu32,
         freqs,
         **common,
     )

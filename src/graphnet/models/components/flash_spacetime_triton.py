@@ -106,6 +106,7 @@ def flash_spacetime_fwd_kernel(
     o1_ptr: tl.tensor,
     ae_ptr: tl.tensor,
     lse_ptr: tl.tensor,  # [B, H, L, C], [B, H, L, C], [B, H, L]
+    cu_ptr: tl.tensor,  # [B+1] token offsets (PACKED only)
     freq_ptr: tl.tensor,  # [F]
     scale: float,
     L: tl.constexpr,
@@ -119,7 +120,7 @@ def flash_spacetime_fwd_kernel(
     F_: tl.constexpr,
     USE_ATTN_BIAS: tl.constexpr,
     USE_ACT_BIAS: tl.constexpr,
-    SKIP_EMPTY_TILES: tl.constexpr,
+    PACKED: tl.constexpr,
     CDTYPE: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
     TIME_SCALE_C: tl.constexpr,
@@ -148,12 +149,22 @@ def flash_spacetime_fwd_kernel(
     offs_cc = tl.arange(0, C_CHUNK)
     row_valid = offs_m < seqlen
     head_live = offs_g < H
+    if PACKED:
+        # Packed [T, H, C] layout: rows of event b start at cu[b].
+        tok0 = tl.load(cu_ptr + b)
+    else:
+        tok0 = 0
 
     # Chunked [M, G, CC] loads from the [B, H, L, C] layout; dead heads and
     # padding rows load 0 (their outputs are zero-stored at the end).
-    row_off = (
-        (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
-    ) * C_ + offs_cc[None, None, :]
+    if PACKED:
+        row_off = (
+            (tok0 + offs_m[:, None, None]) * H + offs_g[None, :, None]
+        ) * C_ + offs_cc[None, None, :]
+    else:
+        row_off = (
+            (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
+        ) * C_ + offs_cc[None, None, :]
     row_mask = row_valid[:, None, None] & head_live[None, :, None]
     qt0 = (
         tl.load(q_ptr + row_off + 0 * C_CHUNK, mask=row_mask, other=0.0)
@@ -178,7 +189,10 @@ def flash_spacetime_fwd_kernel(
             u_ptr + row_off + 2 * C_CHUNK, mask=row_mask, other=0.0
         ).to(CDTYPE)
 
-    feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
+    if PACKED:
+        feats_i = feats_ptr + (tok0 + offs_m) * FEAT_STRIDE
+    else:
+        feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
     fm = row_valid
     pix = tl.load(feats_i + 0, mask=fm, other=0.0)
     piy = tl.load(feats_i + 1, mask=fm, other=0.0)
@@ -197,16 +211,20 @@ def flash_spacetime_fwd_kernel(
     m_run = tl.full((BLOCK_M, G_PAD), float("-inf"), dtype=tl.float32)
     l_run = tl.zeros((BLOCK_M, G_PAD), dtype=tl.float32)
 
-    for n0 in range(0, L, BLOCK_N):
+    # Runtime loop bound: keys exist only up to the event's length, in
+    # both layouts.
+    for n0 in range(0, seqlen, BLOCK_N):
         offs_n = n0 + tl.arange(0, BLOCK_N)
         col_valid = offs_n < seqlen
-        # Front-packed padding: a tile has valid keys iff its first column
-        # is valid. The skip is perf-only (col_valid masking already zeroes
-        # empty tiles' contributions), so it can be compiled out.
-        if (not SKIP_EMPTY_TILES) or n0 < seqlen:
-            col_off = (
-                (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
-            ) * C_ + offs_cc[None, None, :]
+        if True:
+            if PACKED:
+                col_off = (
+                    (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
+                ) * C_ + offs_cc[None, None, :]
+            else:
+                col_off = (
+                    (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
+                ) * C_ + offs_cc[None, None, :]
             col_mask = col_valid[:, None, None] & head_live[None, :, None]
             k0 = tl.load(
                 k_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0
@@ -239,9 +257,12 @@ def flash_spacetime_fwd_kernel(
             )  # [G, M, N] fp32 accum
 
             if USE_ATTN_BIAS or USE_ACT_BIAS:
-                feats_j = (
-                    feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
-                )
+                if PACKED:
+                    feats_j = feats_ptr + (tok0 + offs_n) * FEAT_STRIDE
+                else:
+                    feats_j = (
+                        feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
+                    )
                 cm = col_valid
                 pjx = tl.load(feats_j + 0, mask=cm, other=0.0)
                 pjy = tl.load(feats_j + 1, mask=cm, other=0.0)
@@ -366,7 +387,10 @@ def flash_spacetime_fwd_kernel(
             mask=row_mask,
         )
     lse = m_run + tl.log(l_safe)
-    lse_off = (b * H + offs_g[None, :]) * L + offs_m[:, None]
+    if PACKED:
+        lse_off = (tok0 + offs_m[:, None]) * H + offs_g[None, :]
+    else:
+        lse_off = (b * H + offs_g[None, :]) * L + offs_m[:, None]
     tl.store(
         lse_ptr + lse_off,
         lse,
@@ -396,14 +420,25 @@ def flash_spacetime_forward(
     block_n: Optional[int] = None,
     num_warps: int = 8,
     num_stages: int = 1,
-    skip_empty_tiles: bool = True,
+    cu_seqlens: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """Fused forward. Returns (O [B,H,L,D] with pad rows zeroed, LSE).
 
     Inputs follow `spacetime_attention_reference`; `seqlens` is the [B]
-    int tensor of valid lengths (front-packed padding assumed).
+    int tensor of valid lengths (front-packed padding assumed). With
+    `cu_seqlens` ([B+1] token offsets) the tensors are instead PACKED:
+    q/k/v [T, H, D], feats [T, F], outputs [T, H, D] — no padding exists
+    anywhere and lengths are unbounded (`seqlens` is ignored).
     """
-    batch, heads, length, dim = q.shape
+    packed = cu_seqlens is not None
+    if cu_seqlens is not None:
+        cu = cu_seqlens.to(torch.int32).contiguous()
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+        batch = int(seqlens.numel())
+        _, heads, dim = q.shape
+        length = int(seqlens.max())
+    else:
+        batch, heads, length, dim = q.shape
     c = weight.shape[1]
     if c != dim:
         raise ValueError(f"C (={c}) must equal head_dim (={dim})")
@@ -433,14 +468,22 @@ def flash_spacetime_forward(
         u = qc  # dummy pointer, never read
 
     o1 = torch.zeros_like(qc)
-    ae = (
-        torch.zeros(batch, heads, length, c, device=q.device, dtype=q.dtype)
-        if use_activation_bias
-        else qc  # dummy pointer, never written
-    )
-    lse = torch.zeros(
-        batch, heads, length, device=q.device, dtype=torch.float32
-    )
+    if packed:
+        ae = torch.zeros_like(qc) if use_activation_bias else qc
+        lse = torch.zeros(
+            qc.shape[0], heads, device=q.device, dtype=torch.float32
+        )
+    else:
+        ae = (
+            torch.zeros(
+                batch, heads, length, c, device=q.device, dtype=q.dtype
+            )
+            if use_activation_bias
+            else qc  # dummy pointer, never written
+        )
+        lse = torch.zeros(
+            batch, heads, length, device=q.device, dtype=torch.float32
+        )
 
     grid = (triton.cdiv(length, block_m), batch)
     flash_spacetime_fwd_kernel[grid](
@@ -453,6 +496,7 @@ def flash_spacetime_forward(
         o1,
         ae,
         lse,
+        cu if packed else seqlens.to(torch.int32).contiguous(),
         freqs,
         scale_value,
         L=length,
@@ -466,7 +510,7 @@ def flash_spacetime_forward(
         F_=c // 2,
         USE_ATTN_BIAS=use_attn_bias,
         USE_ACT_BIAS=use_activation_bias,
-        SKIP_EMPTY_TILES=skip_empty_tiles,
+        PACKED=packed,
         CDTYPE=tl.bfloat16 if compute_bf16 else tl.float32,
         # ieee fp32 dots hit an LLVM assertion in this triton build;
         # tf32x3 (three-pass tf32) reaches fp32-class accuracy (~1e-7
@@ -485,10 +529,14 @@ def flash_spacetime_forward(
         o2 = ae.to(torch.float32) @ weight.to(torch.float32).t()
         if bias is not None:
             o2 = o2 + bias.to(torch.float32)
-        # Pad rows must stay exactly zero after the +bias broadcast.
-        idx = torch.arange(length, device=q.device)
-        valid = (idx.unsqueeze(0) < seqlens.unsqueeze(1))[:, None, :, None]
-        out = out + (o2 * valid).to(out.dtype)
+        if packed:
+            # Every packed row is a real token; nothing to re-zero.
+            out = out + o2.to(out.dtype)
+        else:
+            # Pad rows must stay exactly zero after the +bias broadcast.
+            idx = torch.arange(length, device=q.device)
+            valid = (idx.unsqueeze(0) < seqlens.unsqueeze(1))[:, None, :, None]
+            out = out + (o2 * valid).to(out.dtype)
     return out, lse
 
 
@@ -513,6 +561,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
         scale: Optional[float],
         use_attn_bias: bool,
         use_activation_bias: bool,
+        cu_seqlens: Optional[Tensor] = None,
     ) -> Tensor:
         if feats.requires_grad:
             raise ValueError("feats (detector data) must not require grad")
@@ -527,6 +576,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             scale=scale,
             use_attn_bias=use_attn_bias,
             use_activation_bias=use_activation_bias,
+            cu_seqlens=cu_seqlens,
         )
         ctx.save_for_backward(
             q,
@@ -538,8 +588,10 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             seqlens,
             out,
             lse,
+            cu_seqlens if cu_seqlens is not None else q.new_empty(0),
         )
         ctx.has_bias = bias is not None
+        ctx.packed = cu_seqlens is not None
         ctx.scale = scale
         ctx.flags = (use_attn_bias, use_activation_bias)
         return out
@@ -548,9 +600,25 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
     def backward(  # type: ignore[override]
         ctx: Any, grad_out: Tensor
     ) -> Tuple[Optional[Tensor], ...]:
-        q, k, v, feats, weight, bias_t, seqlens, out, lse = ctx.saved_tensors
+        (
+            q,
+            k,
+            v,
+            feats,
+            weight,
+            bias_t,
+            seqlens,
+            out,
+            lse,
+            cu_t,
+        ) = ctx.saved_tensors
         bias = bias_t if ctx.has_bias else None
+        cu_seqlens = cu_t if ctx.packed else None
         use_attn_bias, use_activation_bias = ctx.flags
+        if ctx.packed and os.environ.get("FLASH_ST_REFERENCE_BWD") == "1":
+            raise RuntimeError(
+                "the reference backward supports the padded layout only"
+            )
         if os.environ.get("FLASH_ST_REFERENCE_BWD", "0") != "1":
             from graphnet.models.components.flash_spacetime_triton_bwd import (
                 flash_spacetime_backward,
@@ -570,6 +638,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
                 scale=ctx.scale,
                 use_attn_bias=use_attn_bias,
                 use_activation_bias=use_activation_bias,
+                cu_seqlens=cu_seqlens,
             )
             # With both biases off the projection never enters the graph;
             # autograd's convention for unused parameters is None, not zeros.
@@ -585,6 +654,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
                     if (bias is not None and bias.requires_grad and proj_used)
                     else None
                 ),
+                None,
                 None,
                 None,
                 None,
@@ -654,6 +724,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -685,4 +756,40 @@ def flash_spacetime_attention(
         scale,
         use_attn_bias,
         use_activation_bias,
+        None,
+    )
+
+
+def flash_spacetime_attention_varlen(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    feats: Tensor,
+    weight: Tensor,
+    bias: Optional[Tensor],
+    cu_seqlens: Tensor,
+    scale: Optional[float] = None,
+    use_attn_bias: bool = True,
+    use_activation_bias: bool = True,
+) -> Tensor:
+    """Packed (uncapped) fused spacetime-bias attention.
+
+    q/k/v are [T, H, D] and feats [T, F] with events delimited by
+    `cu_seqlens` ([B+1] token offsets, cu[0] = 0, cu[-1] = T) — the layout
+    of a jagged NestedTensor's values buffer. No padding exists anywhere,
+    so event lengths are unbounded.
+    """
+    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+    return _FlashSpacetimeAttention.apply(
+        q,
+        k,
+        v,
+        feats,
+        weight,
+        bias,
+        seqlens,
+        scale,
+        use_attn_bias,
+        use_activation_bias,
+        cu_seqlens,
     )
