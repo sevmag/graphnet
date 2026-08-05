@@ -504,7 +504,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
     ) -> Tensor:
         if feats.requires_grad:
             raise ValueError("feats (detector data) must not require grad")
-        out, _ = flash_spacetime_forward(
+        out, lse = flash_spacetime_forward(
             q,
             k,
             v,
@@ -524,6 +524,8 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             weight,
             bias if bias is not None else q.new_empty(0),
             seqlens,
+            out,
+            lse,
         )
         ctx.has_bias = bias is not None
         ctx.scale = scale
