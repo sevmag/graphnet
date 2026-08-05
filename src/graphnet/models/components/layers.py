@@ -533,17 +533,22 @@ def apply_spacetime_rope(
 ) -> Tensor:
     """Rotate per-head 2D subspaces of `t` by per-token angles (RoPE).
 
-    `t` is a dense `[N, num_heads * head_dim]` projection buffer; `cos`/`sin`
-    are `[N, head_dim // 2]` per-token rotation angles shared across heads.
-    Rotations preserve norms and make the q.k dot product depend on the
-    coordinates only through per-token angle *differences*, i.e. relative
-    spacetime geometry, at zero extra attention cost.
+    `t` is a dense `[N, num_heads * head_dim]` projection buffer. `cos`/`sin`
+    are per-token rotation angles, either `[N, head_dim // 2]` (shared
+    across heads) or `[N, num_heads, head_dim // 2]` (per-head, as in the
+    nD-RoPE construction where every head carries its own rotation of the
+    wave-vector set). Rotations preserve norms and make the q.k dot product
+    depend on the coordinates only through per-token angle *differences*,
+    i.e. relative spacetime geometry, at zero extra attention cost.
     """
     th = t.unflatten(-1, [num_heads, head_dim])
     half = head_dim // 2
     t1, t2 = th[..., :half], th[..., half:]
-    c = cos.to(t.dtype).unsqueeze(-2)
-    s = sin.to(t.dtype).unsqueeze(-2)
+    c = cos.to(t.dtype)
+    s = sin.to(t.dtype)
+    if c.ndim == 2:
+        c = c.unsqueeze(-2)
+        s = s.unsqueeze(-2)
     return torch.cat([t1 * c - t2 * s, t1 * s + t2 * c], dim=-1).flatten(-2)
 
 

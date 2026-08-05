@@ -104,7 +104,7 @@ class DeepIce(GNN):
                     input_dim=hidden_dim,
                     num_heads=hidden_dim // head_size,
                     mlp_ratio=mlp_ratio,
-                    drop_path=0.0 * (i / (depth - 1)),
+                    drop_path=0.0 * (i / max(depth - 1, 1)),
                     init_values=1,
                 )
                 for i in range(depth)
