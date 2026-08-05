@@ -34,6 +34,7 @@ from graphnet.models.components.flash_spacetime import (
 )
 from graphnet.models.components.flash_spacetime_triton import (
     _e_chunk,
+    _next_pow2,
     _pair_angle,
 )
 
@@ -226,10 +227,10 @@ def flash_spacetime_bwd_cols_kernel(
     dv1 = tl.zeros((BLOCK_N, G_PAD, C_CHUNK), dtype=tl.float32)
     dv2 = tl.zeros((BLOCK_N, G_PAD, C_CHUNK), dtype=tl.float32)
 
-    for m0 in tl.range(0, seqlen, BLOCK_M, num_stages=1):
+    for m0 in range(0, L, BLOCK_M):
         offs_m = m0 + tl.arange(0, BLOCK_M)
         row_valid = offs_m < seqlen
-        if True:
+        if m0 < seqlen:
             if PACKED:
                 row_off = (
                     (tok0 + offs_m[:, None, None]) * H + offs_g[None, :, None]
@@ -591,10 +592,10 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
         g1 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
         g2 = tl.zeros((BLOCK_M, C_CHUNK, G_PAD), dtype=tl.float32)
 
-    for n0 in tl.range(0, seqlen, BLOCK_N, num_stages=1):
+    for n0 in range(0, L, BLOCK_N):
         offs_n = n0 + tl.arange(0, BLOCK_N)
         col_valid = offs_n < seqlen
-        if True:
+        if n0 < seqlen:
             if PACKED:
                 col_off = (
                     (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
@@ -797,7 +798,7 @@ def flash_spacetime_backward(
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         batch = int(seqlens.numel())
         _, heads, dim = q.shape
-        length = int(seqlens.max())
+        length = _next_pow2(int(seqlens.max()), floor=16)
         do = grad_out.contiguous()
     else:
         batch, heads, length, dim = q.shape

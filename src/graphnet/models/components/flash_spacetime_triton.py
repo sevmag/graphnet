@@ -211,12 +211,13 @@ def flash_spacetime_fwd_kernel(
     m_run = tl.full((BLOCK_M, G_PAD), float("-inf"), dtype=tl.float32)
     l_run = tl.zeros((BLOCK_M, G_PAD), dtype=tl.float32)
 
-    # Runtime loop bound: keys exist only up to the event's length, in
-    # both layouts.
-    for n0 in tl.range(0, seqlen, BLOCK_N, num_stages=1):
+    # Constexpr loop bound (runtime bounds force the compiler into a
+    # shared-memory allocation far past the SM90 budget); the scalar skip
+    # discards tiles beyond the event's length.
+    for n0 in range(0, L, BLOCK_N):
         offs_n = n0 + tl.arange(0, BLOCK_N)
         col_valid = offs_n < seqlen
-        if True:
+        if n0 < seqlen:
             if PACKED:
                 col_off = (
                     (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
@@ -436,7 +437,9 @@ def flash_spacetime_forward(
         seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
         batch = int(seqlens.numel())
         _, heads, dim = q.shape
-        length = int(seqlens.max())
+        # The kernel's loop bound is constexpr; bucketize to the next power
+        # of two so at most a handful of specializations ever compile.
+        length = _next_pow2(int(seqlens.max()), floor=16)
     else:
         batch, heads, length, dim = q.shape
     c = weight.shape[1]
