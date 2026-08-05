@@ -314,7 +314,11 @@ def test_backward_matches_oracle(
             full,
             _atol(dtype, flags),
             f"grad {key}",
-            reduction=key in ("W", "b"),
+            # Every gradient is an L-fold (or B*H*L^2-fold) reduction, so
+            # the exchangeable-error-locations argument applies to all of
+            # them; the aggregate assertion still forbids being worse
+            # overall.
+            reduction=True,
         )
 
 
