@@ -559,13 +559,20 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
                 use_attn_bias=use_attn_bias,
                 use_activation_bias=use_activation_bias,
             )
+            # With both biases off the projection never enters the graph;
+            # autograd's convention for unused parameters is None, not zeros.
+            proj_used = use_attn_bias or use_activation_bias
             return (
                 dq if q.requires_grad else None,
                 dk if k.requires_grad else None,
                 dv if v.requires_grad else None,
                 None,
-                dw if weight.requires_grad else None,
-                (db if (bias is not None and bias.requires_grad) else None),
+                dw if (weight.requires_grad and proj_used) else None,
+                (
+                    db
+                    if (bias is not None and bias.requires_grad and proj_used)
+                    else None
+                ),
                 None,
                 None,
                 None,
