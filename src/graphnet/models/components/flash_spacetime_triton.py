@@ -111,7 +111,6 @@ def flash_spacetime_fwd_kernel(
     BLOCK_N: tl.constexpr,
     G_PAD: tl.constexpr,
     C_: tl.constexpr,
-    C_PAD: tl.constexpr,
     C_CHUNK: tl.constexpr,
     F_: tl.constexpr,
     USE_ATTN_BIAS: tl.constexpr,
@@ -123,47 +122,52 @@ def flash_spacetime_fwd_kernel(
     INPUT_SCALE: tl.constexpr,
     CLIP: tl.constexpr,
 ) -> None:
-    """One CTA: BLOCK_M query rows of one batch element, all heads."""
+    """One CTA: BLOCK_M query rows of one batch element, all heads.
+
+    Every channel-carrying tensor lives in three C_CHUNK-wide chunks
+    (3 * C_CHUNK == C): Triton block shapes must be powers of two, the
+    16-wide dot slices keep shared-memory staging small enough for the
+    fp32 path, and no padded channel is ever loaded or computed.
+    """
     pid_m = tl.program_id(0)
     b = tl.program_id(1)
     m0 = pid_m * BLOCK_M
 
     offs_m = m0 + tl.arange(0, BLOCK_M)
     offs_g = tl.arange(0, G_PAD)
-    offs_c = tl.arange(0, C_PAD)
+    offs_cc = tl.arange(0, C_CHUNK)
     seqlen = tl.load(seqlen_ptr + b)
     row_valid = offs_m < seqlen
     head_live = offs_g < H
-    c_live = offs_c < C_
 
-    # [M, G, C] loads from the [B, H, L, C] layout; dead heads/channels and
+    # Chunked [M, G, CC] loads from the [B, H, L, C] layout; dead heads and
     # padding rows load 0 (their outputs are zero-stored at the end).
-    qkv_off = (
+    row_off = (
         (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
-    ) * C_ + offs_c[None, None, :]
-    load_mask = (
-        row_valid[:, None, None]
-        & head_live[None, :, None]
-        & c_live[None, None, :]
-    )
-    qt = tl.load(q_ptr + qkv_off, mask=load_mask, other=0.0) * scale
-    qt = qt.to(CDTYPE)
+    ) * C_ + offs_cc[None, None, :]
+    row_mask = row_valid[:, None, None] & head_live[None, :, None]
+    qt0 = (
+        tl.load(q_ptr + row_off + 0 * C_CHUNK, mask=row_mask, other=0.0)
+        * scale
+    ).to(CDTYPE)
+    qt1 = (
+        tl.load(q_ptr + row_off + 1 * C_CHUNK, mask=row_mask, other=0.0)
+        * scale
+    ).to(CDTYPE)
+    qt2 = (
+        tl.load(q_ptr + row_off + 2 * C_CHUNK, mask=row_mask, other=0.0)
+        * scale
+    ).to(CDTYPE)
     if USE_ATTN_BIAS:
-        # u in C_CHUNK slices: register tensors cannot be range-sliced, so
-        # the chunks are separate loads from the same [B, H, L, C] buffer.
-        u_off = (
-            (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
-        ) * C_ + tl.arange(0, C_CHUNK)[None, None, :]
-        u_mask = row_valid[:, None, None] & head_live[None, :, None]
-        u0 = tl.load(u_ptr + u_off + 0 * C_CHUNK, mask=u_mask, other=0.0).to(
-            CDTYPE
-        )
-        u1 = tl.load(u_ptr + u_off + 1 * C_CHUNK, mask=u_mask, other=0.0).to(
-            CDTYPE
-        )
-        u2 = tl.load(u_ptr + u_off + 2 * C_CHUNK, mask=u_mask, other=0.0).to(
-            CDTYPE
-        )
+        u0 = tl.load(
+            u_ptr + row_off + 0 * C_CHUNK, mask=row_mask, other=0.0
+        ).to(CDTYPE)
+        u1 = tl.load(
+            u_ptr + row_off + 1 * C_CHUNK, mask=row_mask, other=0.0
+        ).to(CDTYPE)
+        u2 = tl.load(
+            u_ptr + row_off + 2 * C_CHUNK, mask=row_mask, other=0.0
+        ).to(CDTYPE)
 
     feats_i = feats_ptr + b * L * FEAT_STRIDE + offs_m * FEAT_STRIDE
     fm = row_valid
@@ -172,7 +176,9 @@ def flash_spacetime_fwd_kernel(
     piz = tl.load(feats_i + 2, mask=fm, other=0.0)
     pit = tl.load(feats_i + 3, mask=fm, other=0.0)
 
-    acc_v = tl.zeros((BLOCK_M, G_PAD, C_PAD), dtype=tl.float32)
+    acc0 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
+    acc1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
+    acc2 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
     if USE_ACT_BIAS:
         ae0 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
         ae1 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
@@ -187,24 +193,37 @@ def flash_spacetime_fwd_kernel(
         # is valid. The skip is perf-only (col_valid masking already zeroes
         # empty tiles' contributions), so it can be compiled out.
         if (not SKIP_EMPTY_TILES) or n0 < seqlen:
-            kv_off = (
+            col_off = (
                 (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
-            ) * C_ + offs_c[None, None, :]
-            kv_mask = (
-                col_valid[:, None, None]
-                & head_live[None, :, None]
-                & c_live[None, None, :]
-            )
-            k = tl.load(k_ptr + kv_off, mask=kv_mask, other=0.0).to(
+            ) * C_ + offs_cc[None, None, :]
+            col_mask = col_valid[:, None, None] & head_live[None, :, None]
+            k0 = tl.load(
+                k_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0
+            ).to(
                 CDTYPE
-            )  # [N, G, C]
-            v = tl.load(v_ptr + kv_off, mask=kv_mask, other=0.0).to(CDTYPE)
+            )  # [N, G, CC]
+            k1 = tl.load(
+                k_ptr + col_off + 1 * C_CHUNK, mask=col_mask, other=0.0
+            ).to(CDTYPE)
+            k2 = tl.load(
+                k_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
+            ).to(CDTYPE)
 
-            # [M, G, C] @ [G was batch]: QK per head — batch dim must lead.
-            # Rearrange to [G, M, C] x [G, C, N].
+            # QK per head, chunked over channels:
+            # [G, M, CC] @ [G, CC, N] accumulated over the three chunks.
             s = tl.dot(
-                tl.trans(qt, 1, 0, 2),
-                tl.trans(k, 1, 2, 0),
+                tl.trans(qt0, 1, 0, 2),
+                tl.trans(k0, 1, 2, 0),
+                input_precision=INPUT_PRECISION,
+            )
+            s += tl.dot(
+                tl.trans(qt1, 1, 0, 2),
+                tl.trans(k1, 1, 2, 0),
+                input_precision=INPUT_PRECISION,
+            )
+            s += tl.dot(
+                tl.trans(qt2, 1, 0, 2),
+                tl.trans(k2, 1, 2, 0),
                 input_precision=INPUT_PRECISION,
             )  # [G, M, N] fp32 accum
 
@@ -270,13 +289,44 @@ def flash_spacetime_fwd_kernel(
             l_run = l_run * alpha + tl.sum(p, axis=2)
             m_run = m_new
             pb = p.to(CDTYPE)
+            pbt = tl.trans(pb, 1, 0, 2)  # [G, M, N]
 
-            acc_v = acc_v * alpha[:, :, None]
-            # [M,G,N] @ [M?]: P@V per head: [G,M,N]@[G,N,C].
-            acc_v += tl.trans(
+            v0 = tl.load(
+                v_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0
+            ).to(CDTYPE)
+            v1 = tl.load(
+                v_ptr + col_off + 1 * C_CHUNK, mask=col_mask, other=0.0
+            ).to(CDTYPE)
+            v2 = tl.load(
+                v_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
+            ).to(CDTYPE)
+
+            # P@V per head, chunked: [G, M, N] @ [G, N, CC] -> back to
+            # [M, G, CC].
+            acc0 = acc0 * alpha[:, :, None] + tl.trans(
                 tl.dot(
-                    tl.trans(pb, 1, 0, 2),
-                    tl.trans(v, 1, 0, 2),
+                    pbt,
+                    tl.trans(v0, 1, 0, 2),
+                    input_precision=INPUT_PRECISION,
+                ),
+                1,
+                0,
+                2,
+            )
+            acc1 = acc1 * alpha[:, :, None] + tl.trans(
+                tl.dot(
+                    pbt,
+                    tl.trans(v1, 1, 0, 2),
+                    input_precision=INPUT_PRECISION,
+                ),
+                1,
+                0,
+                2,
+            )
+            acc2 = acc2 * alpha[:, :, None] + tl.trans(
+                tl.dot(
+                    pbt,
+                    tl.trans(v2, 1, 0, 2),
                     input_precision=INPUT_PRECISION,
                 ),
                 1,
@@ -295,35 +345,15 @@ def flash_spacetime_fwd_kernel(
                 )
 
     l_safe = tl.where(l_run == 0.0, 1.0, l_run)
-    out_mask = load_mask
-    tl.store(
-        o1_ptr + qkv_off,
-        acc_v / l_safe[:, :, None],
-        mask=out_mask,
-    )
+    inv_l = 1.0 / l_safe[:, :, None]
+    tl.store(o1_ptr + row_off + 0 * C_CHUNK, acc0 * inv_l, mask=row_mask)
+    tl.store(o1_ptr + row_off + 1 * C_CHUNK, acc1 * inv_l, mask=row_mask)
+    tl.store(o1_ptr + row_off + 2 * C_CHUNK, acc2 * inv_l, mask=row_mask)
     if USE_ACT_BIAS:
-        ae_off = (
-            (b * H + offs_g[None, :, None]) * L + offs_m[:, None, None]
-        ) * C_
-        cc = tl.arange(0, C_CHUNK)
-        ae_m = row_valid[:, None, None] & head_live[None, :, None]
-        tl.store(
-            ae_ptr + ae_off + 0 * C_CHUNK + cc[None, None, :],
-            ae0 / l_safe[:, :, None],
-            mask=ae_m,
-        )
-        tl.store(
-            ae_ptr + ae_off + 1 * C_CHUNK + cc[None, None, :],
-            ae1 / l_safe[:, :, None],
-            mask=ae_m,
-        )
-        tl.store(
-            ae_ptr + ae_off + 2 * C_CHUNK + cc[None, None, :],
-            ae2 / l_safe[:, :, None],
-            mask=ae_m,
-        )
+        tl.store(ae_ptr + row_off + 0 * C_CHUNK, ae0 * inv_l, mask=row_mask)
+        tl.store(ae_ptr + row_off + 1 * C_CHUNK, ae1 * inv_l, mask=row_mask)
+        tl.store(ae_ptr + row_off + 2 * C_CHUNK, ae2 * inv_l, mask=row_mask)
     lse = m_run + tl.log(l_safe)
-    lse = tl.where(row_valid[:, None] & head_live[None, :], lse, 0.0)
     lse_off = (b * H + offs_g[None, :]) * L + offs_m[:, None]
     tl.store(
         lse_ptr + lse_off,
@@ -419,7 +449,6 @@ def flash_spacetime_forward(
         BLOCK_N=block_n,
         G_PAD=_next_pow2(heads),
         C_=c,
-        C_PAD=_next_pow2(c),
         C_CHUNK=16,
         F_=c // 2,
         USE_ATTN_BIAS=use_attn_bias,
@@ -430,7 +459,7 @@ def flash_spacetime_forward(
         # tf32x3 (three-pass tf32) reaches fp32-class accuracy (~1e-7
         # relative) through a lowering that works. bf16 operand dots
         # ignore input_precision entirely.
-        INPUT_PRECISION="ieee" if compute_bf16 else "tf32x3",
+        INPUT_PRECISION="ieee",
         TIME_SCALE_C=TIME_SCALE,
         INPUT_SCALE=SINEMB_INPUT_SCALE,
         CLIP=SINEMB_CLIP,
