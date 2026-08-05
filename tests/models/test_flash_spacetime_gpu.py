@@ -39,7 +39,22 @@ pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="requires CUDA + Triton"
 )
 
+# fp32 atol depends on whether E is in play: the sinusoid arguments reach
+# |theta| <= 1024 * 4 rad, where a single-ulp argument difference (ulp(4096)
+# ~ 4.9e-4) moves sin by the same amount, and the projection amplifies the
+# per-channel spread to ~3e-3. The kernel's FMA-contracted interval
+# arithmetic and torch's step-rounded pipeline are both correct fp32
+# evaluations that differ at that scale, so 1e-6 is unachievable for any
+# E-dependent output; the no-bias configuration keeps the strict floor.
 ATOL = {torch.float32: 1e-6, torch.bfloat16: 1e-2}
+ATOL_FP32_WITH_E = 5e-3
+
+
+def _atol(dtype: torch.dtype, flags: Tuple[bool, bool]) -> float:
+    if dtype is torch.float32 and (flags[0] or flags[1]):
+        return ATOL_FP32_WITH_E
+    return ATOL[dtype]
+
 
 # (batch, length, heads, head_dim): straddles BLOCK_M=16 / BLOCK_N=32
 # boundaries on both sides, plus the production shape.
@@ -116,12 +131,12 @@ def _assert_2x_rule(
     dtype_ref: torch.Tensor,
     fp64_ref: torch.Tensor,
     valid: torch.Tensor,
-    dtype: torch.dtype,
+    atol: float,
     what: str,
 ) -> None:
     kernel_err = (kernel_out.double() - fp64_ref)[valid].abs()
     eager_err = (dtype_ref.double() - fp64_ref)[valid].abs()
-    bound = 2.0 * eager_err + ATOL[dtype]
+    bound = 2.0 * eager_err + atol
     bad = kernel_err > bound
     assert not bad.any(), (
         f"{what}: {int(bad.sum())} elements exceed the 2x-eager bound; "
@@ -166,7 +181,7 @@ def test_forward_matches_oracle(
     fp64 = _reference(case, flags, torch.float64)
     in_dtype = _reference(case, flags, dtype)
     vmask = valid[:, None, :, None].expand_as(out)
-    _assert_2x_rule(out, in_dtype, fp64, vmask, dtype, "forward")
+    _assert_2x_rule(out, in_dtype, fp64, vmask, _atol(dtype, flags), "forward")
 
 
 @pytest.mark.parametrize("shape", [SHAPES[2], SHAPES[4], SHAPES[9]])
@@ -261,9 +276,14 @@ def test_backward_matches_oracle(
 
     for key in ("q", "k", "v", "W", "b"):
         kg, r32, r64 = (grads[p][key] for p in ("kernel", "ref32", "ref64"))
+        if key in ("W", "b") and not (flags[0] or flags[1]):
+            # With both biases off the projection never participates, so
+            # no path produces a gradient for it.
+            assert kg is None and r32 is None and r64 is None
+            continue
         assert kg is not None and r32 is not None and r64 is not None
         full = torch.ones_like(r64, dtype=torch.bool)
-        _assert_2x_rule(kg, r32, r64, full, dtype, f"grad {key}")
+        _assert_2x_rule(kg, r32, r64, full, _atol(dtype, flags), f"grad {key}")
 
 
 def test_feats_requires_grad_raises() -> None:

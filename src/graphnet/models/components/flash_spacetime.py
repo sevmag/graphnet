@@ -82,7 +82,10 @@ def spacetime_pair_features(
     freqs = sinusoidal_frequencies(weight.shape[1], feats.device)
     ang = x.unsqueeze(-1) * freqs
     emb = torch.cat((torch.sin(ang), torch.cos(ang)), dim=-1)
-    return torch.nn.functional.linear(emb, weight, bias)
+    # The embedding follows the feats dtype; the projection runs in the
+    # weight's dtype, exactly as autocast treats the eager module (interval
+    # and sinusoids in fp32, Linear in the compute dtype).
+    return torch.nn.functional.linear(emb.to(weight.dtype), weight, bias)
 
 
 def pair_mask_bias(key_padding_mask: Tensor) -> Tensor:
