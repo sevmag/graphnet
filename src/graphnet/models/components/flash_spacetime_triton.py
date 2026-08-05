@@ -116,6 +116,7 @@ def flash_spacetime_fwd_kernel(
     F_: tl.constexpr,
     USE_ATTN_BIAS: tl.constexpr,
     USE_ACT_BIAS: tl.constexpr,
+    SKIP_EMPTY_TILES: tl.constexpr,
     CDTYPE: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
     TIME_SCALE_C: tl.constexpr,
@@ -183,8 +184,9 @@ def flash_spacetime_fwd_kernel(
         offs_n = n0 + tl.arange(0, BLOCK_N)
         col_valid = offs_n < seqlen
         # Front-packed padding: a tile has valid keys iff its first column
-        # is valid.
-        if n0 < seqlen:
+        # is valid. The skip is perf-only (col_valid masking already zeroes
+        # empty tiles' contributions), so it can be compiled out.
+        if (not SKIP_EMPTY_TILES) or n0 < seqlen:
             kv_off = (
                 (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
             ) * C_ + offs_c[None, None, :]
@@ -351,6 +353,7 @@ def flash_spacetime_forward(
     block_m: int = 16,
     block_n: Optional[int] = None,
     num_warps: int = 8,
+    skip_empty_tiles: bool = True,
 ) -> Tuple[Tensor, Tensor]:
     """Fused forward. Returns (O [B,H,L,D] with pad rows zeroed, LSE).
 
@@ -421,8 +424,13 @@ def flash_spacetime_forward(
         F_=c // 2,
         USE_ATTN_BIAS=use_attn_bias,
         USE_ACT_BIAS=use_activation_bias,
+        SKIP_EMPTY_TILES=skip_empty_tiles,
         CDTYPE=tl.bfloat16 if compute_bf16 else tl.float32,
-        INPUT_PRECISION="ieee",
+        # ieee fp32 dots hit an LLVM assertion in this triton build;
+        # tf32x3 (three-pass tf32) reaches fp32-class accuracy (~1e-7
+        # relative) through a lowering that works. bf16 operand dots
+        # ignore input_precision entirely.
+        INPUT_PRECISION="ieee" if compute_bf16 else "tf32x3",
         TIME_SCALE_C=TIME_SCALE,
         INPUT_SCALE=SINEMB_INPUT_SCALE,
         CLIP=SINEMB_CLIP,
