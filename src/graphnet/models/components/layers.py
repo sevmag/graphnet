@@ -405,6 +405,57 @@ class Block_rel(LightningModule):
             x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
 
+    def forward_flash(
+        self,
+        x: Tensor,
+        feats: Tensor,
+        seqlens: Tensor,
+        spacetime: "LightningModule",
+        use_bias: bool = True,
+    ) -> Tensor:
+        """`forward` with the fused spacetime-bias attention kernel.
+
+        Semantically the eager path with `rel_pos_bias =
+        spacetime(feats)` (or None when `use_bias` is False), but the
+        per-pair tensor is never materialised: the kernel recomputes the
+        interval features in-tile and routes dW/db to the same
+        `spacetime.projection` parameters. Padding rows of the output are
+        exactly zero rather than eager's garbage; nothing downstream
+        reads them either way.
+        """
+        # Heavy optional dependency (triton, GPU-only): imported on first
+        # use so CPU-only environments can still import this module.
+        from graphnet.models.components.flash_spacetime import (
+            attention_rel_oracle_inputs,
+            merge_heads,
+        )
+        from graphnet.models.components.flash_spacetime_triton import (
+            flash_spacetime_attention,
+        )
+
+        xn = self.norm1(x)
+        q, k, v = attention_rel_oracle_inputs(self.attn, xn)
+        out = flash_spacetime_attention(
+            q,
+            k,
+            v,
+            feats,
+            spacetime.projection.weight,
+            spacetime.projection.bias,
+            seqlens,
+            scale=self.attn.scale,
+            use_attn_bias=use_bias and self.attn.use_attn_bias,
+            use_activation_bias=use_bias and self.attn.use_activation_bias,
+        )
+        out = self.attn.proj_drop(self.attn.proj(merge_heads(out)))
+        if self.gamma_1 is None:
+            x = x + self.drop_path(out)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = x + self.drop_path(self.gamma_1 * self.drop_path(out))
+            x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
+        return x
+
 
 class Attention_rel(LightningModule):
     """Attention mechanism with relative position bias."""

@@ -46,6 +46,7 @@ class DeepIce(GNN):
         n_features: int = 6,
         use_nested_attention: bool = False,
         compile_blocks: bool = False,
+        use_flash_spacetime: bool = False,
     ):
         """Construct `DeepIce`.
 
@@ -77,6 +78,13 @@ class DeepIce(GNN):
                 step; compiling the whole stack as one graph is what turns
                 the nested path from slower-than-padded (eager) into
                 faster. No effect on numerics.
+            use_flash_spacetime: Run the relative-attention sandwich
+                through the fused Triton kernel (Triton >= 3.3, CUDA):
+                the `SpacetimeEncoder` pair tensor and the [B, H, L, L]
+                attention intermediates are never materialised. Verified
+                equal to the eager path within a few output-scale ulps,
+                forward and backward; requires head_size == 48 and the
+                NuBench 5-feature order.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -134,6 +142,7 @@ class DeepIce(GNN):
 
         self.include_dynedge = include_dynedge
         self.use_nested_attention = use_nested_attention
+        self.use_flash_spacetime = use_flash_spacetime
         self._blocks_fn: Callable[..., Tensor] = self._run_blocks
         if compile_blocks:
             # DDP's graph-splitting optimizer overlaps gradient all-reduce by
@@ -207,14 +216,24 @@ class DeepIce(GNN):
             graph, _ = to_dense_batch(graph, data.batch)
             x = torch.cat([x, graph], 2)
 
-        rel_pos_bias = self.rel_pos(x0)
         attn_mask = torch.zeros(mask.shape, device=mask.device)
         attn_mask[~mask] = -torch.inf
 
-        for i, blk in enumerate(self.sandwich):
-            x = blk(x, attn_mask, rel_pos_bias)
-            if i + 1 == self.n_rel:
-                rel_pos_bias = None
+        if self.use_flash_spacetime:
+            for i, blk in enumerate(self.sandwich):
+                x = blk.forward_flash(
+                    x,
+                    x0,
+                    seq_length,
+                    self.rel_pos,
+                    use_bias=i < self.n_rel,
+                )
+        else:
+            rel_pos_bias = self.rel_pos(x0)
+            for i, blk in enumerate(self.sandwich):
+                x = blk(x, attn_mask, rel_pos_bias)
+                if i + 1 == self.n_rel:
+                    rel_pos_bias = None
 
         if self.use_nested_attention:
             x = self._to_nested_with_cls(x, data.batch, seq_length)
