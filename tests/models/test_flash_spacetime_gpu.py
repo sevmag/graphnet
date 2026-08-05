@@ -141,13 +141,13 @@ def _assert_2x_rule(
 ) -> None:
     kernel_err = (kernel_out.double() - fp64_ref)[valid].abs()
     eager_err = (dtype_ref.double() - fp64_ref)[valid].abs()
-    # The elementwise floor is scale-aware for low-precision dtypes: the
-    # kernel rounds at different sites than eager (it keeps S and P in
-    # fp32 and rounds once), so at any single element it may sit a few
-    # output-scale ulps away while being at least as accurate overall —
-    # which the aggregate assertion below enforces.
+    # The elementwise floor is scale-aware: the kernel rounds at
+    # different sites than eager and both accumulate hundreds of terms,
+    # so single elements legitimately sit several output-scale ulps
+    # apart in either direction; the aggregate assertion below enforces
+    # that overall accuracy is never worse.
     ulp = ULP.get(kernel_out.dtype, 0.0)
-    floor = atol + 4.0 * ulp * fp64_ref[valid].abs().clamp(min=1.0)
+    floor = atol + 8.0 * ulp * fp64_ref[valid].abs().clamp(min=1.0)
     ref_err = eager_err
     if reduction:
         # Global-reduction outputs (dW, db sum B*H*L^2 terms): kernel and

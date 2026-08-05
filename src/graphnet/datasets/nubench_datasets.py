@@ -70,12 +70,17 @@ def _read_event_nos(path: str) -> List[int]:
     raise OSError(f"Could not fully read {path}: {last_err}")
 
 
+# Column order is load-bearing: SpacetimeEncoder reads its interval time
+# from column 3, DOMChargeEncoder reads charge from column 3, and
+# DeepIceRope reads time from column 4 — all written against the
+# (x, y, z, charge, t) order every trained checkpoint of this program
+# used. Reordering silently changes what those models compute.
 FEATURES_NUBENCH = [
     "sensor_pos_x",
     "sensor_pos_y",
     "sensor_pos_z",
-    "t",
     "charge",
+    "t",
 ]
 
 TRUTH_NUBENCH = [
