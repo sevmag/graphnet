@@ -22,11 +22,12 @@ match eager exactly (one-sided pairs masked with -inf; the eager both-padding
 quirk affects only padding rows and so is not replicated). Heads are padded
 in-register to `G_PAD` (next power of two >= H, min 16 for `tl.dot`).
 
-The backward pass currently routes through the pure-PyTorch reference
-(materialises `R`; correct but memory-bound) — the dedicated Triton backward
-replaces it without changing this module's public surface.
+The backward runs the deterministic two-kernel Triton scheme in
+`flash_spacetime_triton_bwd` (set FLASH_ST_REFERENCE_BWD=1 to fall back to
+the exact autograd-through-the-reference path, which materialises `R`).
 """
 
+import os
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -480,10 +481,11 @@ def flash_spacetime_forward(
 
 
 class _FlashSpacetimeAttention(torch.autograd.Function):
-    """Fused forward; backward via the eager reference (interim).
+    """Fused forward and deterministic Triton backward.
 
-    The reference backward materialises R (memory-bound but exact); the
-    dedicated Triton backward will replace it behind the same interface.
+    FLASH_ST_REFERENCE_BWD=1 selects autograd through the eager
+    reference instead (exact but materialises R) — the debugging A/B for
+    the Triton backward.
     """
 
     @staticmethod
@@ -532,9 +534,41 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
     def backward(  # type: ignore[override]
         ctx: Any, grad_out: Tensor
     ) -> Tuple[Optional[Tensor], ...]:
-        q, k, v, feats, weight, bias_t, seqlens = ctx.saved_tensors
+        q, k, v, feats, weight, bias_t, seqlens, out, lse = ctx.saved_tensors
         bias = bias_t if ctx.has_bias else None
         use_attn_bias, use_activation_bias = ctx.flags
+        if os.environ.get("FLASH_ST_REFERENCE_BWD", "0") != "1":
+            from graphnet.models.components.flash_spacetime_triton_bwd import (
+                flash_spacetime_backward,
+            )
+
+            dq, dk, dv, dw, db = flash_spacetime_backward(
+                q,
+                k,
+                v,
+                feats,
+                weight,
+                bias,
+                seqlens,
+                out,
+                lse,
+                grad_out,
+                scale=ctx.scale,
+                use_attn_bias=use_attn_bias,
+                use_activation_bias=use_activation_bias,
+            )
+            return (
+                dq if q.requires_grad else None,
+                dk if k.requires_grad else None,
+                dv if v.requires_grad else None,
+                None,
+                dw if weight.requires_grad else None,
+                (db if (bias is not None and bias.requires_grad) else None),
+                None,
+                None,
+                None,
+                None,
+            )
         length = q.shape[2]
         idx = torch.arange(length, device=q.device)
         valid = idx.unsqueeze(0) < seqlens.unsqueeze(1)
