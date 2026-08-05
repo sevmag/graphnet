@@ -155,11 +155,15 @@ def spacetime_attention_reference(
     if key_padding_mask is not None:
         attn = attn + pair_mask_bias(key_padding_mask).unsqueeze(1)
 
+    # A float32 padding mask promotes bf16 logits to fp32 (as in the
+    # eager module under autocast, whose matmul wrapper then casts operands
+    # back down); the explicit casts reproduce that behavior and are no-ops
+    # in uniform-dtype runs.
     p = attn.softmax(dim=-1)
-    out = p @ v
+    out = p.to(v.dtype) @ v
     if use_activation_bias:
         assert rel is not None
-        out = out + torch.einsum("bhij,bijc->bhic", p, rel)
+        out = out + torch.einsum("bhij,bijc->bhic", p.to(rel.dtype), rel)
     return out
 
 
