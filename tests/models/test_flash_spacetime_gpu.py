@@ -137,6 +137,7 @@ def _assert_2x_rule(
     valid: torch.Tensor,
     atol: float,
     what: str,
+    reduction: bool = False,
 ) -> None:
     kernel_err = (kernel_out.double() - fp64_ref)[valid].abs()
     eager_err = (dtype_ref.double() - fp64_ref)[valid].abs()
@@ -147,7 +148,15 @@ def _assert_2x_rule(
     # which the aggregate assertion below enforces.
     ulp = ULP.get(kernel_out.dtype, 0.0)
     floor = atol + 4.0 * ulp * fp64_ref[valid].abs().clamp(min=1.0)
-    bound = 2.0 * eager_err + floor
+    ref_err = eager_err
+    if reduction:
+        # Global-reduction outputs (dW, db sum B*H*L^2 terms): kernel and
+        # eager error patterns are independent random walks, so an element
+        # where eager landed lucky must not impose a bound below eager's
+        # typical error. The aggregate mean assertion below still forbids
+        # the kernel being worse overall.
+        ref_err = torch.maximum(eager_err, eager_err.median())
+    bound = 2.0 * ref_err + floor
     bad = kernel_err > bound
     assert not bad.any(), (
         f"{what}: {int(bad.sum())} elements exceed the 2x-eager bound; "
@@ -298,7 +307,15 @@ def test_backward_matches_oracle(
             continue
         assert kg is not None and r32 is not None and r64 is not None
         full = torch.ones_like(r64, dtype=torch.bool)
-        _assert_2x_rule(kg, r32, r64, full, _atol(dtype, flags), f"grad {key}")
+        _assert_2x_rule(
+            kg,
+            r32,
+            r64,
+            full,
+            _atol(dtype, flags),
+            f"grad {key}",
+            reduction=key in ("W", "b"),
+        )
 
 
 def test_feats_requires_grad_raises() -> None:
