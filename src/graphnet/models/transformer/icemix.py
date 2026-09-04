@@ -9,7 +9,8 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, Optional, Callable
+from torch.utils.checkpoint import checkpoint
+from typing import Set, Dict, Any, Optional, Callable, List, Tuple
 
 from graphnet.models.components.layers import (
     Block_rel,
@@ -45,6 +46,8 @@ class DeepIce(GNN):
         dynedge_args: Optional[Dict[str, Any]] = None,
         n_features: int = 6,
         use_nested_attention: bool = False,
+        bucketed_rel: bool = False,
+        rel_pair_budget: int = 1 << 26,
         compile_blocks: bool = False,
     ):
         """Construct `DeepIce`.
@@ -72,6 +75,19 @@ class DeepIce(GNN):
                 kernels on CUDA with fp16/bf16. The relative-attention
                 blocks are unaffected, as their attention bias requires
                 padded sequences.
+            bucketed_rel: Run the relative-attention blocks per
+                length-sorted event bucket instead of over the full padded
+                batch. Every per-pair tensor (the spacetime bias and the
+                attention matrix) then costs each event roughly its own
+                length squared rather than the batch maximum squared, which
+                is what makes heavy-tailed, uncapped event lengths
+                tractable. Same modules, same math per event; only the
+                padding an event is grouped with changes.
+            rel_pair_budget: Upper bound on ``bucket_size * max_len**2``
+                when forming buckets, i.e. on the element count of any
+                bucket's pairwise tensors. Bounds peak memory of the
+                checkpointed recompute; a single event longer than the
+                budget still forms its own bucket.
             compile_blocks: Wrap the transformer block stack in
                 `torch.compile`. The jagged path issues many small ops per
                 step; compiling the whole stack as one graph is what turns
@@ -134,6 +150,8 @@ class DeepIce(GNN):
 
         self.include_dynedge = include_dynedge
         self.use_nested_attention = use_nested_attention
+        self.bucketed_rel = bucketed_rel
+        self.rel_pair_budget = rel_pair_budget
         self._blocks_fn: Callable[..., Tensor] = self._run_blocks
         if compile_blocks:
             # DDP's graph-splitting optimizer overlaps gradient all-reduce by
@@ -194,6 +212,80 @@ class DeepIce(GNN):
             max_seqlen=max_len + 1,
         )
 
+    def _rel_stack(self, x: Tensor, x0: Tensor, attn_mask: Tensor) -> Tensor:
+        """Run the relative blocks over one already-padded slice.
+
+        The spacetime bias is computed inside so that, under activation
+        checkpointing, its O(len^2) intermediates are recomputed in the
+        backward pass instead of stored.
+        """
+        rel_pos_bias = self.rel_pos(x0)
+        for i, blk in enumerate(self.sandwich):
+            x = blk(x, attn_mask, rel_pos_bias)
+            if i + 1 == self.n_rel:
+                rel_pos_bias = None
+        return x
+
+    def run_rel_blocks_bucketed(
+        self, x: Tensor, x0: Tensor, seq_length: Tensor
+    ) -> Tensor:
+        """Apply the relative blocks bucketed by event length.
+
+        Events are sorted by length and grouped greedily so that no
+        bucket's pairwise tensors exceed ``rel_pair_budget`` elements; each
+        bucket is padded only to its own longest event. With heavy-tailed
+        lengths this brings the total pairwise cost down from
+        ``batch * max_len**2`` to roughly ``sum(len_i**2)``. Each bucket
+        runs under activation checkpointing, so peak memory is one bucket's
+        forward rather than the sum over buckets.
+
+        Args:
+            x: Padded embeddings [batch, max_len, dim] (post Fourier).
+            x0: Padded raw features [batch, max_len, n_features], consumed
+                by the spacetime encoder.
+            seq_length: Real event lengths [batch].
+
+        Returns:
+            Padded embeddings [batch, max_len, dim]; padding positions are
+            zero (they carry no information downstream either way).
+        """
+        lengths = seq_length.to(device=x.device)
+        ll: List[int] = lengths.tolist()
+        order = sorted(range(len(ll)), key=ll.__getitem__)
+        buckets: List[Tuple[List[int], int]] = []
+        cur: List[int] = []
+        cur_max = 0
+        for idx in order:
+            cap = max(cur_max, ll[idx])
+            if cur and (len(cur) + 1) * cap * cap > self.rel_pair_budget:
+                buckets.append((cur, cur_max))
+                cur, cur_max = [idx], ll[idx]
+            else:
+                cur.append(idx)
+                cur_max = cap
+        if cur:
+            buckets.append((cur, cur_max))
+        out = torch.zeros_like(x)
+        for idxs, max_len in buckets:
+            bucket_len = max(int(max_len), 1)
+            bi = torch.as_tensor(idxs, device=x.device)
+            xb = x.index_select(0, bi)[:, :bucket_len]
+            x0b = x0.index_select(0, bi)[:, :bucket_len]
+            mb = (
+                torch.arange(bucket_len, device=x.device)[None]
+                < lengths[bi][:, None]
+            )
+            attn_mask = torch.zeros(mb.shape, device=x.device)
+            attn_mask[~mb] = -torch.inf
+            if torch.is_grad_enabled() and x.requires_grad:
+                yb = checkpoint(
+                    self._rel_stack, xb, x0b, attn_mask, use_reentrant=False
+                )
+            else:
+                yb = self._rel_stack(xb, x0b, attn_mask)
+            out[bi, :bucket_len] = yb
+        return out
+
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
         x0, mask, seq_length = array_to_sequence(
@@ -207,14 +299,17 @@ class DeepIce(GNN):
             graph, _ = to_dense_batch(graph, data.batch)
             x = torch.cat([x, graph], 2)
 
-        rel_pos_bias = self.rel_pos(x0)
-        attn_mask = torch.zeros(mask.shape, device=mask.device)
-        attn_mask[~mask] = -torch.inf
+        if self.bucketed_rel:
+            x = self.run_rel_blocks_bucketed(x, x0, seq_length)
+        else:
+            rel_pos_bias = self.rel_pos(x0)
+            attn_mask = torch.zeros(mask.shape, device=mask.device)
+            attn_mask[~mask] = -torch.inf
 
-        for i, blk in enumerate(self.sandwich):
-            x = blk(x, attn_mask, rel_pos_bias)
-            if i + 1 == self.n_rel:
-                rel_pos_bias = None
+            for i, blk in enumerate(self.sandwich):
+                x = blk(x, attn_mask, rel_pos_bias)
+                if i + 1 == self.n_rel:
+                    rel_pos_bias = None
 
         if self.use_nested_attention:
             x = self._to_nested_with_cls(x, data.batch, seq_length)
