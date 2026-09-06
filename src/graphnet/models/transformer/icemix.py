@@ -155,16 +155,36 @@ class DeepIce(GNN):
         """cls_tocken should not be subject to weight decay during training."""
         return {"cls_token"}
 
+    @staticmethod
+    def _additive_mask(keep: Tensor) -> Tensor:
+        """Turn a boolean keep-mask into the additive -inf mask attention takes."""
+        attn_mask = torch.zeros(keep.shape, device=keep.device)
+        attn_mask[~keep] = -torch.inf
+        return attn_mask
+
+    def _run_rel_blocks(
+        self, x: Tensor, x0: Tensor, attn_mask: Tensor
+    ) -> Tensor:
+        """Apply the relative-attention stack over padded sequences.
+
+        Only the leading `n_rel` blocks receive the spacetime bias; the rest
+        run as plain attention.
+        """
+        rel_pos_bias = self.rel_pos(x0)
+        for i, blk in enumerate(self.sandwich):
+            x = blk(x, attn_mask, rel_pos_bias)
+            if i + 1 == self.n_rel:
+                rel_pos_bias = None
+        return x
+
     def _to_nested_with_cls(
         self, x: Tensor, batch_idx: Tensor, seq_length: Tensor
     ) -> Tensor:
         """Repack padded `x` as a jagged `NestedTensor`, prepending `cls`.
 
-        Only the real (non-padding) positions of `x` are kept, so the
-        transformer blocks never compute on padding. Each event's sequence
-        starts with the cls token, mirroring the `torch.cat` in the padded
-        path. All indexing is arithmetic on `batch_idx` rather than boolean
-        masks, which would force host/device synchronisations every step.
+        Padding positions are dropped, so the blocks never compute on them.
+        Indexing is arithmetic on `batch_idx` rather than boolean masks, which
+        would force a host sync every step.
         """
         batch_size, max_len, num_features = x.shape
         n_pulses = batch_idx.shape[0]
@@ -183,10 +203,9 @@ class DeepIce(GNN):
         values[offsets[batch_idx] + 1 + pos] = x.reshape(-1, num_features)[
             batch_idx * max_len + pos
         ]
-        # Cache the seqlen extremes on the NestedTensor: the fused varlen
-        # attention kernels need max_seqlen, and torch.compile requires
-        # this metadata to be present consistently when tracing. `x` is
-        # padded to the longest event, so `max_len` is exact.
+        # The fused varlen kernels need max_seqlen, and torch.compile requires
+        # it to be present consistently when tracing; `x` is padded to the
+        # longest event, so `max_len` is exact.
         return torch.nested.nested_tensor_from_jagged(
             values,
             offsets,
@@ -201,44 +220,26 @@ class DeepIce(GNN):
         )
         assert mask is not None
         x = self.fourier_ext(x0, seq_length)
-        batch_size = mask.shape[0]
         if self.include_dynedge:
-            graph = self.dyn_edge(data)
-            graph, _ = to_dense_batch(graph, data.batch)
+            graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
 
-        rel_pos_bias = self.rel_pos(x0)
-        attn_mask = torch.zeros(mask.shape, device=mask.device)
-        attn_mask[~mask] = -torch.inf
-
-        for i, blk in enumerate(self.sandwich):
-            x = blk(x, attn_mask, rel_pos_bias)
-            if i + 1 == self.n_rel:
-                rel_pos_bias = None
+        x = self._run_rel_blocks(x, x0, self._additive_mask(mask))
 
         if self.use_nested_attention:
-            x = self._to_nested_with_cls(x, data.batch, seq_length)
-            x = self._blocks_fn(x)
-            # The cls token output of each event sits at its sequence start.
+            x = self._blocks_fn(
+                self._to_nested_with_cls(x, data.batch, seq_length)
+            )
+            # each event's cls output sits at its sequence start
             return x.values()[x.offsets()[:-1]]
 
-        mask = torch.cat(
-            [
-                torch.ones(
-                    batch_size, 1, dtype=mask.dtype, device=mask.device
-                ),
-                mask,
-            ],
-            1,
-        )
-        attn_mask = torch.zeros(mask.shape, device=mask.device)
-        attn_mask[~mask] = -torch.inf
         cls_token = self.cls_token.weight.unsqueeze(0).expand(
-            batch_size, -1, -1
+            mask.shape[0], -1, -1
         )
-        x = torch.cat([cls_token, x], 1)
-        x = self._blocks_fn(x, attn_mask)
-
+        keep = torch.cat([mask.new_ones((mask.shape[0], 1)), mask], 1)
+        x = self._blocks_fn(
+            torch.cat([cls_token, x], 1), self._additive_mask(keep)
+        )
         return x[:, 0]
 
     def _run_blocks(
@@ -248,11 +249,10 @@ class DeepIce(GNN):
     ) -> Tensor:
         """Apply the plain transformer block stack.
 
-        Kept as a single method so the whole stack can be wrapped in one
-        `torch.compile` region instead of one graph per block. On a jagged
-        input the blocks run on the dense value buffer (see
-        `Block.forward_jagged`); the sequence-length metadata is read once
-        here and threaded through, rather than re-derived per block.
+        One method so the whole stack compiles as a single graph rather than
+        one per block. On jagged input the blocks run on the dense value
+        buffer (`Block.forward_jagged`), with the seqlen metadata read once
+        here instead of re-derived per block.
         """
         if x.is_nested:
             offsets = x.offsets()
