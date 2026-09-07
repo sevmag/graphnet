@@ -76,6 +76,9 @@ class DataRepresentation(Model):
 
         self.nb_inputs = len(self._input_feature_names)
 
+        if self._add_inactive_sensors:
+            self._validate_add_inactive_sensors()
+
         # Set data type
         self.to(dtype)
 
@@ -235,6 +238,38 @@ class DataRepresentation(Model):
             self._sensor_mask = self._convert_string_to_sensor_mask()
 
         return
+
+    def _validate_add_inactive_sensors(self) -> None:
+        """Check the geometry table can supply values for every input feature.
+
+        Inactive sensors are attached by copying their feature values out of
+        the detector's geometry table, so a feature with no column there has
+        nothing to copy. Without this check that surfaces per event as a
+        `KeyError` raised by pandas from inside the concatenation, naming
+        neither the feature nor the reason.
+
+        Note that the position columns are the geometry table's index, so a
+        detector whose `xyz` names match the index rather than real columns
+        also lands here.
+        """
+        available = set(
+            self._detector.geometry_table.reset_index(drop=True).columns
+        )
+        missing = [
+            feature
+            for feature in self._input_feature_names
+            if feature not in available
+        ]
+        if missing:
+            raise ValueError(
+                f"`add_inactive_sensors=True` requires a value for every "
+                f"input feature in the geometry table of "
+                f"`{self._detector.__class__.__name__}`, but {missing} "
+                f"{'is not a column' if len(missing) == 1 else 'are not columns'}"
+                f" of {self._detector.geometry_table_path}. Add "
+                f"{'it' if len(missing) == 1 else 'them'} to the geometry "
+                f"table, or set `add_inactive_sensors=False`."
+            )
 
     def _convert_string_to_sensor_mask(self) -> List[int]:
         """Convert a string mask to a sensor mask."""
