@@ -218,6 +218,70 @@ class ARCA115(Detector):
         return x / 1.05e04
 
 
+class ARCA115Realistic(Detector):
+    """`Detector` class for ARCA115 at the KM3NeT readout level.
+
+    `ARCA115` describes the photon tier, where a hit is a detected photon and
+    the only observables are the module position and an arrival time. This
+    class describes what the DAQ would actually deliver: L0 hits carrying a
+    time-over-threshold and the pointing direction of the photocathode that
+    fired.
+
+    The multi-PMT module is the reason the direction matters. A KM3NeT module
+    holds 31 photocathodes facing different ways, so the same photon recorded
+    on an up- rather than down-facing PMT means something different, and a
+    model given only the module position cannot tell the two apart.
+
+    Expected features: `x`, `y`, `z`, `dir_x`, `dir_y`, `dir_z`, `t`, `tot`.
+    Positions and directions are carried per hit rather than joined from
+    `geometry_table`, which indexes modules by a 0-based string and a global
+    sensor number where the simulation labels them 1-based per string.
+
+    `npe`, `charge` and `is_noise` are simulation truth with no measurable
+    counterpart, so they are deliberately absent from the feature map and
+    passing them as inputs raises rather than silently training on truth.
+    """
+
+    geometry_table_path = os.path.join(
+        PROMETHEUS_GEOMETRY_TABLE_DIR, "arca.parquet"
+    )
+    xyz = ["x", "y", "z"]
+    string_id_column = "sensor_string_id"
+    sensor_id_column = "sensor_id"
+
+    def feature_map(self) -> Dict[str, Callable]:
+        """Map standardization functions to each dimension."""
+        feature_map = {
+            "x": self._xy,
+            "y": self._xy,
+            "z": self._z,
+            "dir_x": self._identity,
+            "dir_y": self._identity,
+            "dir_z": self._identity,
+            "t": self._t,
+            "tot": self._tot,
+        }
+        return feature_map
+
+    def _xy(self, x: torch.tensor) -> torch.tensor:
+        return x / 500.0
+
+    def _z(self, x: torch.tensor) -> torch.tensor:
+        # The instrumented depths span 2888-3500 m, so dividing alone would
+        # leave a large offset carrying almost no variance.
+        return (x + 3200.0) / 200.0
+
+    def _t(self, x: torch.tensor) -> torch.tensor:
+        return (x - 1.0e04) / 2.0e04
+
+    def _tot(self, x: torch.tensor) -> torch.tensor:
+        # Time-over-threshold is KM3NeT's only charge record. Hits whose
+        # discriminator windows overlap are merged into one, which reaches
+        # ~40x the single-photo-electron value, so the tail is compressed
+        # rather than handed to the network raw.
+        return torch.log10(torch.clamp(x, min=1.0))
+
+
 class ORCA150(Detector):
     """`Detector` class for Prometheus ORCA150."""
 
