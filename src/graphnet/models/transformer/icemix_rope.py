@@ -18,7 +18,7 @@ import torch.nn as nn
 from typing import Callable, Optional, Set
 
 from graphnet.models.components.layers import Block
-from graphnet.models.components.embedding import FourierEncoder
+from graphnet.models.components.embedding import FourierEncoderEPJC
 from graphnet.models.gnn.gnn import GNN
 from graphnet.models.utils import array_to_sequence
 
@@ -46,7 +46,8 @@ class DeepIceRope(GNN):
 
         Args:
             hidden_dim: The latent feature dimension.
-            mlp_ratio: Mlp expansion ratio of FourierEncoder and Transformer.
+            mlp_ratio: Mlp expansion ratio of FourierEncoderEPJC and
+                Transformer.
             seq_length: The base feature dimension.
             depth: The depth of the transformer.
             head_size: The size of the attention heads. Must be divisible
@@ -82,7 +83,7 @@ class DeepIceRope(GNN):
                 "(x, y, z, charge, t) and reads the time coordinate "
                 f"from column 4; got n_features={n_features}."
             )
-        self.fourier_ext = FourierEncoder(
+        self.fourier_ext = FourierEncoderEPJC(
             seq_length=seq_length,
             mlp_dim=None,
             output_dim=hidden_dim,

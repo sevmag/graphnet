@@ -9,7 +9,7 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, Optional, Callable
+from typing import Set, Dict, Any, List, Optional, Callable
 
 from graphnet.models.components.layers import (
     Block_rel,
@@ -17,6 +17,7 @@ from graphnet.models.components.layers import (
 )
 from graphnet.models.components.embedding import (
     FourierEncoder,
+    FourierEncoderEPJC,
     SpacetimeDistance,
     SpacetimeEncoder,
 )
@@ -27,6 +28,29 @@ from graphnet.models.utils import array_to_sequence
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.data import Data
 from torch import Tensor
+
+
+def resolve_fourier_schema(
+    schema: Dict[str, float], input_feature_names: List[str]
+) -> Dict[int, float]:
+    """Turn a `{feature name: multiplier}` schema into column indices.
+
+    Naming the features rather than their positions is what stops a model
+    from silently embedding the wrong column when the input order changes:
+    an unknown name raises here instead of shifting every multiplier onto a
+    neighbouring feature. Insertion order is preserved, since it fixes the
+    order of the embedded blocks.
+    """
+    missing = [name for name in schema if name not in input_feature_names]
+    if missing:
+        raise ValueError(
+            f"Cannot build the Fourier schema: {missing} not among the "
+            f"input features {list(input_feature_names)}."
+        )
+    return {
+        input_feature_names.index(name): float(scale)
+        for name, scale in schema.items()
+    }
 
 
 class DeepIce(GNN):
@@ -51,13 +75,16 @@ class DeepIce(GNN):
         use_activation_bias: bool = True,
         alibi_bias: bool = False,
         spacetime_time_scale: float = 3e4 / 500 * 3e-1,
+        fourier_schema: Optional[Dict[str, float]] = None,
+        input_feature_names: Optional[List[str]] = None,
         compile_blocks: bool = False,
     ):
         """Construct `DeepIce`.
 
         Args:
             hidden_dim: The latent feature dimension.
-            mlp_ratio: Mlp expansion ratio of FourierEncoder and Transformer.
+            mlp_ratio: Mlp expansion ratio of FourierEncoderEPJC and
+                Transformer.
             seq_length: The base feature dimension.
             depth: The depth of the transformer.
             head_size: The size of the attention heads.
@@ -93,6 +120,18 @@ class DeepIce(GNN):
                 which costs expressivity but makes the `[L, L]` term a closed
                 form of the coordinates rather than an `[L, L, C]` tensor.
                 Disables the activation bias, which has no scalar analogue.
+            fourier_schema: Which input features to embed and with which
+                multiplier, keyed by feature name, e.g. `{"sensor_pos_x":
+                4096.0, "t": 4096.0, "charge": 1024.0}`. Names are resolved
+                against `input_feature_names`, so the model reads the right
+                column whatever order the data arrives in, and an unknown
+                name raises rather than silently shifting the multipliers
+                onto neighbouring features. Insertion order fixes the order
+                of the embedded blocks. If not given, the encoder is
+                `FourierEncoderEPJC` with its fixed layout and multipliers,
+                as before.
+            input_feature_names: Names of the input columns in order, needed
+                to resolve `fourier_schema`.
             spacetime_time_scale: Factor converting the normalised time
                 coordinate into the normalised length unit, `t_scale * c /
                 pos_scale` for the `Detector` in use. The default is the
@@ -107,13 +146,38 @@ class DeepIce(GNN):
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
-        self.fourier_ext = FourierEncoder(
-            seq_length=seq_length,
-            mlp_dim=None,
-            output_dim=fourier_out_dim,
-            scaled=scaled_emb,
-            n_features=n_features,
-        )
+        self.fourier_mlp: Optional[nn.Module] = None
+        if fourier_schema is None:
+            self.fourier_ext: nn.Module = FourierEncoderEPJC(
+                seq_length=seq_length,
+                mlp_dim=None,
+                output_dim=fourier_out_dim,
+                scaled=scaled_emb,
+                n_features=n_features,
+            )
+        else:
+            if input_feature_names is None:
+                raise ValueError(
+                    "`fourier_schema` names features, so "
+                    "`input_feature_names` is required to resolve them to "
+                    "columns."
+                )
+            self.fourier_ext = FourierEncoder(
+                schema=resolve_fourier_schema(
+                    fourier_schema, input_feature_names
+                ),
+                seq_length=seq_length,
+                scaled=scaled_emb,
+            )
+            # The projection `FourierEncoderEPJC` keeps internally; it is
+            # problem-specific, so the general encoder leaves it to the model.
+            concat_dim = self.fourier_ext.output_dim
+            self.fourier_mlp = nn.Sequential(
+                nn.Linear(concat_dim, concat_dim),
+                nn.LayerNorm(concat_dim),
+                nn.GELU(),
+                nn.Linear(concat_dim, fourier_out_dim),
+            )
         self.rel_pos: nn.Module = (
             SpacetimeDistance(time_scale=spacetime_time_scale)
             if alibi_bias
@@ -263,6 +327,8 @@ class DeepIce(GNN):
         )
         assert mask is not None
         x = self.fourier_ext(x0, seq_length)
+        if self.fourier_mlp is not None:
+            x = self.fourier_mlp(x)
         if self.include_dynedge:
             graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
