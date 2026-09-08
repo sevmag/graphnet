@@ -9,7 +9,7 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, Optional, Union, Callable
+from typing import Set, Dict, Any, Optional, Callable
 
 from graphnet.models.components.attention_blocks import (
     Block_rel,
@@ -18,7 +18,8 @@ from graphnet.models.components.attention_blocks import (
 from graphnet.models.components.embedding import (
     DirectionalSpacetimeEncoder,
     FourierEncoderEPJC,
-    SpacetimeEncoderEPJC,
+    SpacetimeDistance,
+    SpacetimeEncoder,
 )
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
@@ -49,6 +50,11 @@ class DeepIce(GNN):
         rel_pos_kwargs: Optional[Dict[str, Any]] = None,
         medium_key: Optional[str] = None,
         use_nested_attention: bool = False,
+        qk_norm: bool = False,
+        use_attn_bias: bool = True,
+        use_activation_bias: bool = True,
+        alibi_bias: bool = False,
+        spacetime_time_scale: float = 3e4 / 500 * 3e-1,
         compile_blocks: bool = False,
         rel_attention: str = "dense",
         q_tile: int = 64,
@@ -75,11 +81,13 @@ class DeepIce(GNN):
             n_features: The number of features in the input data.
             rel_pos_encoder: The pairwise encoder feeding the relative
                 attention blocks. "epjc" embeds the spacetime interval of
-                each pair, as in the EPJ-C publication. "directional" embeds
-                range, time difference, interval and direction separately;
-                see `DirectionalSpacetimeEncoder`.
+                each pair, as in the EPJ-C publication, through a
+                `SpacetimeEncoder` whose `spacetime_*` arguments default to
+                the publication's constants. "directional" embeds range,
+                time difference, interval and direction separately; see
+                `DirectionalSpacetimeEncoder`.
             rel_pos_kwargs: Arguments for the directional encoder, on top of
-                defaults that match the EPJ-C normalisation.
+                `seq_length=head_size` and `time_scale=spacetime_time_scale`.
             medium_key: Graph attribute holding each event's medium index,
                 for a directional encoder built with `n_media > 1`. Without
                 it every event is treated as medium 0.
@@ -90,6 +98,28 @@ class DeepIce(GNN):
                 kernels on CUDA with fp16/bf16. The relative-attention
                 blocks are unaffected, as their attention bias requires
                 padded sequences.
+            qk_norm: Apply a per-head RMSNorm to queries and keys before the
+                dot product in the plain blocks, bounding the growth of the
+                attention logits. The relative blocks are unaffected: their
+                bias enters the logits through a separate term.
+            use_attn_bias: Add the spacetime bias to the pre-softmax logits
+                of the relative blocks, as `<q_i, R_ij>`.
+            use_activation_bias: Add the spacetime bias to the post-softmax
+                output of the relative blocks, as `sum_j P_ij R_ij`. The two
+                channels are independent, so either may be disabled alone.
+            alibi_bias: Replace the embedded per-pair spacetime feature with
+                the raw signed four-distance scaled by a learned per-head
+                slope, ALiBi-style. The bias no longer depends on the query,
+                which costs expressivity but makes the `[L, L]` term a closed
+                form of the coordinates rather than an `[L, L, C]` tensor.
+                Disables the activation bias, which has no scalar analogue.
+                Only with `rel_pos_encoder="epjc"`.
+            spacetime_time_scale: Factor converting the normalised time
+                coordinate into the normalised length unit, `t_scale * c /
+                pos_scale` for the `Detector` in use. The default is the
+                IceCube value; pass 1.0 with a `Detector` that already emits
+                time in length units, such as
+                `NuBenchSpacetimeDetector`.
             compile_blocks: Wrap the transformer block stack in
                 `torch.compile`. The jagged path issues many small ops per
                 step; compiling the whole stack as one graph is what turns
@@ -118,19 +148,30 @@ class DeepIce(GNN):
             scaled=scaled_emb,
             n_features=n_features,
         )
-        self.rel_pos: Union[SpacetimeEncoderEPJC, DirectionalSpacetimeEncoder]
+        self.rel_pos: nn.Module
         if rel_pos_encoder == "epjc":
             if rel_pos_kwargs or medium_key is not None:
                 raise ValueError(
                     "rel_pos_kwargs and medium_key apply only to the "
                     "directional encoder"
                 )
-            self.rel_pos = SpacetimeEncoderEPJC(head_size)
+            self.rel_pos = (
+                SpacetimeDistance(time_scale=spacetime_time_scale)
+                if alibi_bias
+                else SpacetimeEncoder(
+                    head_size, time_scale=spacetime_time_scale
+                )
+            )
         elif rel_pos_encoder == "directional":
+            if alibi_bias:
+                raise ValueError(
+                    "alibi_bias reads a scalar per pair; the directional "
+                    "encoder produces a feature vector"
+                )
             self.rel_pos = DirectionalSpacetimeEncoder(
                 **{
                     "seq_length": head_size,
-                    "time_scale": 3e4 / 500 * 3e-1,
+                    "time_scale": spacetime_time_scale,
                     **(rel_pos_kwargs or {}),
                 }
             )
@@ -145,11 +186,19 @@ class DeepIce(GNN):
                 "rel_attention='tiled' needs an encoder with forward_tiled; "
                 "the directional encoder has none"
             )
+        if rel_attention == "tiled" and alibi_bias:
+            # The tiled path contracts a per-pair feature vector with the
+            # query; ALiBi's bias is a scalar per pair and is consumed by
+            # a different code path, so the two cannot be combined.
+            raise ValueError("rel_attention='tiled' cannot use alibi_bias")
         self.sandwich = nn.ModuleList(
             [
                 Block_rel(
                     input_dim=hidden_dim,
                     num_heads=hidden_dim // head_size,
+                    use_attn_bias=use_attn_bias,
+                    use_activation_bias=use_activation_bias,
+                    alibi=alibi_bias,
                 )
                 for _ in range(depth_rel)
             ]
@@ -163,6 +212,7 @@ class DeepIce(GNN):
                     mlp_ratio=mlp_ratio,
                     drop_path=0.0 * (i / max(depth - 1, 1)),
                     init_values=1,
+                    qk_norm=qk_norm,
                 )
                 for i in range(depth)
             ]
@@ -236,9 +286,13 @@ class DeepIce(GNN):
         """Apply the relative-attention stack over padded sequences.
 
         Only the leading `n_rel` blocks receive the spacetime bias; the rest
-        run as plain attention. `medium` is each event's medium index, read
-        only by the directional encoder.
+        run as plain attention. With no relative blocks at all the bias is
+        never built -- it is an O(len^2) tensor and would otherwise be the
+        model's dominant cost with nothing consuming it. `medium` is each
+        event's medium index, read only by the directional encoder.
         """
+        if not self.sandwich:
+            return x
         tiled = self.rel_attention == "tiled"
         if tiled:
             # the relative blocks build the bias one query tile at a time

@@ -8,6 +8,7 @@ from torch_geometric.data import Batch, Data
 
 from graphnet.models.components.embedding import (
     DirectionalSpacetimeEncoder,
+    SpacetimeEncoder,
     SpacetimeEncoderEPJC,
 )
 from graphnet.models.gnn import DeepIce
@@ -33,9 +34,14 @@ def _batch() -> Batch:
     return Batch.from_data_list(graphs)
 
 
-def test_default_is_epjc() -> None:
-    """Existing configurations keep the published encoder."""
-    assert isinstance(DeepIce(**SMALL).rel_pos, SpacetimeEncoderEPJC)
+def test_default_matches_epjc() -> None:
+    """Existing configurations keep the published encoder's bias."""
+    model = DeepIce(**SMALL)
+    assert isinstance(model.rel_pos, SpacetimeEncoder)
+    published = SpacetimeEncoderEPJC(SMALL["head_size"])
+    published.load_state_dict(model.rel_pos.state_dict())
+    x = torch.rand(2, 5, 6)
+    assert torch.allclose(model.rel_pos(x), published(x))
 
 
 def test_directional_forward() -> None:
