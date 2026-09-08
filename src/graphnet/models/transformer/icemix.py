@@ -17,7 +17,8 @@ from graphnet.models.components.layers import (
 )
 from graphnet.models.components.embedding import (
     FourierEncoder,
-    SpacetimeEncoderEPJC,
+    SpacetimeDistance,
+    SpacetimeEncoder,
 )
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
@@ -45,6 +46,11 @@ class DeepIce(GNN):
         dynedge_args: Optional[Dict[str, Any]] = None,
         n_features: int = 6,
         use_nested_attention: bool = False,
+        qk_norm: bool = False,
+        use_attn_bias: bool = True,
+        use_activation_bias: bool = True,
+        alibi_bias: bool = False,
+        spacetime_time_scale: float = 3e4 / 500 * 3e-1,
         compile_blocks: bool = False,
     ):
         """Construct `DeepIce`.
@@ -72,6 +78,27 @@ class DeepIce(GNN):
                 kernels on CUDA with fp16/bf16. The relative-attention
                 blocks are unaffected, as their attention bias requires
                 padded sequences.
+            qk_norm: Apply a per-head RMSNorm to queries and keys before the
+                dot product in the plain blocks, bounding the growth of the
+                attention logits. The relative blocks are unaffected: their
+                bias enters the logits through a separate term.
+            use_attn_bias: Add the spacetime bias to the pre-softmax logits
+                of the relative blocks, as `<q_i, R_ij>`.
+            use_activation_bias: Add the spacetime bias to the post-softmax
+                output of the relative blocks, as `sum_j P_ij R_ij`. The two
+                channels are independent, so either may be disabled alone.
+            alibi_bias: Replace the embedded per-pair spacetime feature with
+                the raw signed four-distance scaled by a learned per-head
+                slope, ALiBi-style. The bias no longer depends on the query,
+                which costs expressivity but makes the `[L, L]` term a closed
+                form of the coordinates rather than an `[L, L, C]` tensor.
+                Disables the activation bias, which has no scalar analogue.
+            spacetime_time_scale: Factor converting the normalised time
+                coordinate into the normalised length unit, `t_scale * c /
+                pos_scale` for the `Detector` in use. The default is the
+                IceCube value; pass 1.0 with a `Detector` that already emits
+                time in length units, such as
+                `NuBenchSpacetimeDetector`.
             compile_blocks: Wrap the transformer block stack in
                 `torch.compile`. The jagged path issues many small ops per
                 step; compiling the whole stack as one graph is what turns
@@ -87,12 +114,19 @@ class DeepIce(GNN):
             scaled=scaled_emb,
             n_features=n_features,
         )
-        self.rel_pos = SpacetimeEncoderEPJC(head_size)
+        self.rel_pos: nn.Module = (
+            SpacetimeDistance(time_scale=spacetime_time_scale)
+            if alibi_bias
+            else SpacetimeEncoder(head_size, time_scale=spacetime_time_scale)
+        )
         self.sandwich = nn.ModuleList(
             [
                 Block_rel(
                     input_dim=hidden_dim,
                     num_heads=hidden_dim // head_size,
+                    use_attn_bias=use_attn_bias,
+                    use_activation_bias=use_activation_bias,
+                    alibi=alibi_bias,
                 )
                 for _ in range(depth_rel)
             ]
@@ -106,6 +140,7 @@ class DeepIce(GNN):
                     mlp_ratio=mlp_ratio,
                     drop_path=0.0 * (i / max(depth - 1, 1)),
                     init_values=1,
+                    qk_norm=qk_norm,
                 )
                 for i in range(depth)
             ]
@@ -157,7 +192,11 @@ class DeepIce(GNN):
 
     @staticmethod
     def _additive_mask(keep: Tensor) -> Tensor:
-        """Turn a boolean keep-mask into the additive -inf mask attention takes."""
+        """Turn a boolean keep-mask into an additive mask.
+
+        Attention takes 0 where a key is kept and -inf where it is
+        masked.
+        """
         attn_mask = torch.zeros(keep.shape, device=keep.device)
         attn_mask[~keep] = -torch.inf
         return attn_mask
@@ -168,8 +207,12 @@ class DeepIce(GNN):
         """Apply the relative-attention stack over padded sequences.
 
         Only the leading `n_rel` blocks receive the spacetime bias; the rest
-        run as plain attention.
+        run as plain attention. With no relative blocks at all the bias is
+        never built -- it is an O(len^2) tensor and would otherwise be the
+        model's dominant cost with nothing consuming it.
         """
+        if not self.sandwich:
+            return x
         rel_pos_bias = self.rel_pos(x0)
         for i, blk in enumerate(self.sandwich):
             x = blk(x, attn_mask, rel_pos_bias)

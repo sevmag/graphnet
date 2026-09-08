@@ -477,6 +477,45 @@ class SpacetimeEncoder(LightningModule):
         return self.projection(self.sin_emb(self.scale * four_distance))
 
 
+class SpacetimeDistance(LightningModule):
+    """Signed spacetime four-distance between every pair of steps.
+
+    The scalar `SpacetimeEncoder` embeds; returned raw (and clipped) rather
+    than embedded, for an ALiBi-style bias that scales it per head instead of
+    projecting it into a per-pair feature vector. Being `[B, L, L]` rather
+    than `[B, L, L, C]` it is `C` times cheaper to hold.
+
+    A positive distance is a spacelike pair -- one that no signal could have
+    connected -- and a negative one is timelike, so a monotone bias in this
+    quantity is a soft causal prior.
+    """
+
+    def __init__(
+        self,
+        clip: float = 4.0,
+        columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+        time_scale: float = 1.0,
+    ):
+        """Construct `SpacetimeDistance`.
+
+        Args:
+            clip: Bound on the returned distance. The tail is heavy and
+                unbounded, so an unclipped bias would let a few far-separated
+                pairs dominate the attention logits.
+            columns: Input columns holding `(x, y, z, t)`.
+            time_scale: Factor converting the time column into the position
+                columns\' length unit; see `SpacetimeEncoder`.
+        """
+        super().__init__()
+        self.clip = clip
+        self.columns = columns
+        self.time_scale = time_scale
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Forward pass."""
+        four_distance = signed_four_distance(x, self.time_scale, self.columns)
+        return four_distance.clip(-self.clip, self.clip)
+
 class RRWPLinearNodeEncoder(LightningModule):
     """Relative random walk probability node encoder.
 

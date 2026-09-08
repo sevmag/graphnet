@@ -304,6 +304,7 @@ class Block_rel(LightningModule):
         attn_head_dim: Optional[int] = None,
         use_attn_bias: bool = True,
         use_activation_bias: bool = True,
+        alibi: bool = False,
     ):
         """Construct 'Block_rel'.
 
@@ -331,6 +332,9 @@ class Block_rel(LightningModule):
                 pre-softmax attention logits. Defaults to True.
             use_activation_bias: Inject the relative-position bias into the
                 post-softmax output activations. Defaults to True.
+            alibi: Read `rel_pos_bias` as a scalar distance scaled by a
+                learned per-head slope rather than as a per-pair feature
+                contracted against the query. See `Attention_rel`.
         """
         super().__init__()
         self.norm1 = norm_layer(input_dim)
@@ -343,6 +347,7 @@ class Block_rel(LightningModule):
             attn_head_dim=attn_head_dim,
             use_attn_bias=use_attn_bias,
             use_activation_bias=use_activation_bias,
+            alibi=alibi,
         )
         self.drop_path = (
             DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -420,6 +425,7 @@ class Attention_rel(LightningModule):
         attn_head_dim: Optional[int] = None,
         use_attn_bias: bool = True,
         use_activation_bias: bool = True,
+        alibi: bool = False,
     ):
         """Construct 'Attention_rel'.
 
@@ -442,6 +448,13 @@ class Attention_rel(LightningModule):
             use_activation_bias: inject the relative-position bias into the
                 post-softmax output activations (`sum_j P_ij R_ij`). Defaults
                 to True.
+            alibi: read `rel_pos_bias` as a scalar `[B, L, L]` distance and
+                add it to the logits scaled by a learned per-head slope,
+                ALiBi-style, instead of contracting a `[B, L, L, C]` feature
+                against the query. The bias is then independent of the query
+                content, which is what lets it be recomputed inside a fused
+                attention kernel rather than materialised. Implies no
+                activation bias -- there is no per-pair vector to add.
         """
         if input_dim <= 0 or num_heads <= 0:
             raise ValueError(
@@ -452,7 +465,16 @@ class Attention_rel(LightningModule):
         super().__init__()
         self.num_heads = num_heads
         self.use_attn_bias = use_attn_bias
-        self.use_activation_bias = use_activation_bias
+        self.use_activation_bias = use_activation_bias and not alibi
+        if alibi:
+            # A geometric ladder, as in ALiBi: heads span strong to
+            # negligible causal priors, so the mechanism cannot dominate every
+            # head at once before training has moved the slopes.
+            self.alibi_gamma: Optional[nn.Parameter] = nn.Parameter(
+                2.0 ** -torch.arange(num_heads, dtype=torch.float32)
+            )
+        else:
+            self.alibi_gamma = None
         head_dim = attn_head_dim or input_dim // num_heads
         all_head_dim = head_dim * self.num_heads
         self.scale = qk_scale or head_dim**-0.5
@@ -498,7 +520,12 @@ class Attention_rel(LightningModule):
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
         if rel_pos_bias is not None and self.use_attn_bias:
-            bias = torch.einsum("bhic,bijc->bhij", q, rel_pos_bias)
+            if self.alibi_gamma is not None:
+                bias = self.alibi_gamma.view(1, -1, 1, 1) * rel_pos_bias[
+                    :, None
+                ].to(attn.dtype)
+            else:
+                bias = torch.einsum("bhic,bijc->bhij", q, rel_pos_bias)
             attn = attn + bias
         if key_padding_mask is not None:
             assert (
