@@ -272,7 +272,10 @@ class ARCA115Realistic(Detector):
         return (x + 3200.0) / 200.0
 
     def _t(self, x: torch.tensor) -> torch.tensor:
-        return (x - 1.0e04) / 2.0e04
+        # Scale only: no constant can remove the per-event injection offset,
+        # so the origin is left to the data representation. The divisor is the
+        # spread about an event's own time origin, 1012 ns rms.
+        return x / 1.0e03
 
     def _tot(self, x: torch.tensor) -> torch.tensor:
         # Time-over-threshold is KM3NeT's only charge record. Hits whose
