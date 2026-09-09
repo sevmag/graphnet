@@ -54,8 +54,8 @@ class NuBenchSpacetimeDetector(NuBenchDetector):
       separations are compressed tenfold against horizontal ones.
     - A spacetime interval `dx^2 - (c dt)^2` needs time in length units. The
       conversion factor depends on both scales, so it silently changes with
-      the normalisation; `SpacetimeEncoder`'s default is the IceCube value and
-      is ~167x too small here, which drives the time term to ~0.01% of the
+      the normalisation; `DeepIce`'s default is the IceCube value and is
+      ~167x too small here, which drives the time term to ~0.01% of the
       spatial one and makes essentially every pair read as spacelike.
 
     Here all three axes are scaled by 100 m -- the NuBench geometries span
