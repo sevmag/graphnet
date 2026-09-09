@@ -68,11 +68,11 @@ class DeepIce(GNN):
             n_features: The number of features in the input data.
             rel_attention: How the relative-attention sandwich computes its
                 spacetime bias. `"dense"` (default) precomputes the full
-                `[B, L, L, H]` bias (original behaviour). `"tiled"` computes 
+                `[B, L, L, H]` bias (original behaviour). `"tiled"` computes
                 the bias one query-tile at a time.
             q_tile: Number of query rows per tile when `rel_attention="tiled"`.
             tiled_checkpoint: When `rel_attention="tiled"`, recompute each tile
-                in the backward pass (during training) at the cost of one 
+                in the backward pass (during training) at the cost of one
                 extra forward.
         """
         if rel_attention not in ("dense", "tiled"):
@@ -149,7 +149,7 @@ class DeepIce(GNN):
             data.x, data.batch, padding_value=0
         )
         x = self.fourier_ext(x0, seq_length)
-        tiled = (self.rel_attention == "tiled")
+        tiled = self.rel_attention == "tiled"
 
         rel_pos_bias = None if tiled else self.rel_pos(x0)
         batch_size = mask.shape[0]

@@ -1,13 +1,20 @@
 """Tests for DeepIce's query-tiled relative-attention path."""
 
+from typing import Any, Dict
+
 import pytest
 import torch
 from torch_geometric.data import Data, Batch
 from torch_geometric.nn import knn_graph
 
+from graphnet.models.components.embedding import (
+    SpacetimeEncoder,
+    SpacetimeEncoderEPJC,
+)
 from graphnet.models.gnn import DeepIce
 
 N_FEATURES = 6
+
 
 def _synth_batch(
     nev: int = 4,
@@ -28,8 +35,9 @@ def _synth_batch(
         events.append(data)
     return Batch.from_data_list(events)
 
-def _kwargs(include_dynedge: bool = False) -> dict:
-    kw = dict(
+
+def _kwargs(include_dynedge: bool = False) -> Dict[str, Any]:
+    kw: Dict[str, Any] = dict(
         hidden_dim=128,
         seq_length=64,
         depth=2,
@@ -51,9 +59,12 @@ def _kwargs(include_dynedge: bool = False) -> dict:
         }
     return kw
 
+
 @pytest.mark.parametrize("q_tile", [8, 64, 1000])
 @pytest.mark.parametrize("include_dynedge", [False, True])
-def test_tiled_bit_identical_to_dense(q_tile: int, include_dynedge: bool):
+def test_tiled_bit_identical_to_dense(
+    q_tile: int, include_dynedge: bool
+) -> None:
     """Same weights -> identical output, at any tile size."""
     torch.manual_seed(0)
     dense = DeepIce(**_kwargs(include_dynedge)).double().eval()
@@ -75,7 +86,8 @@ def test_tiled_bit_identical_to_dense(q_tile: int, include_dynedge: bool):
         out_tiled = tiled(batch)
     assert (out_dense - out_tiled).abs().max().item() == 0.0
 
-def test_tiled_gradients_match_dense():
+
+def test_tiled_gradients_match_dense() -> None:
     """Gradients agree, including the checkpointed per-tile recompute.
 
     Run in train mode (all dropouts / drop-paths are 0, so it is
@@ -84,9 +96,7 @@ def test_tiled_gradients_match_dense():
     torch.manual_seed(0)
     dense = DeepIce(**_kwargs()).double().train()
     tiled = (
-        DeepIce(**_kwargs(), rel_attention="tiled", q_tile=16)
-        .double()
-        .train()
+        DeepIce(**_kwargs(), rel_attention="tiled", q_tile=16).double().train()
     )
     tiled.load_state_dict(dense.state_dict())
 
@@ -104,13 +114,12 @@ def test_tiled_gradients_match_dense():
         max_err = max(max_err, (p.grad - gd).abs().max().item())
     assert max_err < 1e-8, max_err
 
-def test_tiled_trains_with_checkpoint():
+
+def test_tiled_trains_with_checkpoint() -> None:
     """Train mode: finite loss, gradients flow through checkpointed tiles."""
     torch.manual_seed(0)
     tiled = (
-        DeepIce(**_kwargs(), rel_attention="tiled", q_tile=8)
-        .double()
-        .train()
+        DeepIce(**_kwargs(), rel_attention="tiled", q_tile=8).double().train()
     )
     out = tiled(_synth_batch())
     out.pow(2).sum().backward()
@@ -120,3 +129,47 @@ def test_tiled_trains_with_checkpoint():
         if p.grad is not None
     )
     assert torch.isfinite(out).all() and gsum > 0
+
+
+@pytest.mark.parametrize("q_tile", [1, 7, 16, 1000])
+def test_encoder_tiles_match_untiled(q_tile: int) -> None:
+    """Both encoders reproduce `forward` from a sequence of bands.
+
+    `forward` is defined as the whole-sequence case of `forward_tiled`, so
+    this pins the property that makes that definition safe: the bands, when
+    stitched back together along the query axis, are the untiled result --
+    including for a band size that does not divide the sequence length.
+    """
+    torch.manual_seed(0)
+    length = 40
+    x = torch.randn(3, length, 5, dtype=torch.float64)
+
+    encoders = {
+        "EPJC": SpacetimeEncoderEPJC(seq_length=32).double().eval(),
+        # Non-default on every axis the generalisation exposes, so a band
+        # that silently used the EPJC constants would not match.
+        "configurable": SpacetimeEncoder(
+            seq_length=32,
+            output_dim=8,
+            columns=(2, 3, 4, 0),
+            time_scale=1.0,
+            scale=97.0,
+            clip=2.5,
+            n_freq=188.0,
+        )
+        .double()
+        .eval(),
+    }
+
+    for name, encoder in encoders.items():
+        with torch.no_grad():
+            full = encoder(x)
+            stitched = torch.cat(
+                [
+                    encoder.forward_tiled(x, s, min(s + q_tile, length))
+                    for s in range(0, length, q_tile)
+                ],
+                dim=1,
+            )
+        assert stitched.shape == full.shape, name
+        assert torch.equal(stitched, full), name
