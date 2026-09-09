@@ -504,7 +504,7 @@ class SpacetimeDistance(LightningModule):
                 pairs dominate the attention logits.
             columns: Input columns holding `(x, y, z, t)`.
             time_scale: Factor converting the time column into the position
-                columns\' length unit; see `SpacetimeEncoder`.
+                columns' length unit; see `SpacetimeEncoder`.
         """
         super().__init__()
         self.clip = clip
@@ -515,6 +515,7 @@ class SpacetimeDistance(LightningModule):
         """Forward pass."""
         four_distance = signed_four_distance(x, self.time_scale, self.columns)
         return four_distance.clip(-self.clip, self.clip)
+
 
 class RRWPLinearNodeEncoder(LightningModule):
     """Relative random walk probability node encoder.
