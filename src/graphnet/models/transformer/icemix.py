@@ -30,29 +30,6 @@ from torch_geometric.data import Data
 from torch import Tensor
 
 
-def resolve_fourier_schema(
-    schema: Dict[str, float], input_feature_names: List[str]
-) -> Dict[int, float]:
-    """Turn a `{feature name: multiplier}` schema into column indices.
-
-    Naming the features rather than their positions is what stops a model
-    from silently embedding the wrong column when the input order changes:
-    an unknown name raises here instead of shifting every multiplier onto a
-    neighbouring feature. Insertion order is preserved, since it fixes the
-    order of the embedded blocks.
-    """
-    missing = [name for name in schema if name not in input_feature_names]
-    if missing:
-        raise ValueError(
-            f"Cannot build the Fourier schema: {missing} not among the "
-            f"input features {list(input_feature_names)}."
-        )
-    return {
-        input_feature_names.index(name): float(scale)
-        for name, scale in schema.items()
-    }
-
-
 class DeepIce(GNN):
     """DeepIce model."""
 
@@ -98,51 +75,30 @@ class DeepIce(GNN):
                 Competition settings. If `include_dynedge` is False, this
                 argument have no impact.
             n_features: The number of features in the input data.
-            use_nested_attention: Run the plain transformer blocks on jagged
-                `NestedTensor`s instead of padded sequences with an
-                attention mask. Removes all compute on padding and lets
-                attention dispatch to fused variable-length (flash)
-                kernels on CUDA with fp16/bf16. The relative-attention
-                blocks are unaffected, as their attention bias requires
-                padded sequences.
-            qk_norm: Apply a per-head RMSNorm to queries and keys before the
-                dot product in the plain blocks, bounding the growth of the
-                attention logits. The relative blocks are unaffected: their
-                bias enters the logits through a separate term.
-            use_attn_bias: Add the spacetime bias to the pre-softmax logits
-                of the relative blocks, as `<q_i, R_ij>`.
-            use_activation_bias: Add the spacetime bias to the post-softmax
-                output of the relative blocks, as `sum_j P_ij R_ij`. The two
-                channels are independent, so either may be disabled alone.
-            alibi_bias: Replace the embedded per-pair spacetime feature with
-                the raw signed four-distance scaled by a learned per-head
-                slope, ALiBi-style. The bias no longer depends on the query,
-                which costs expressivity but makes the `[L, L]` term a closed
-                form of the coordinates rather than an `[L, L, C]` tensor.
-                Disables the activation bias, which has no scalar analogue.
-            fourier_schema: Which input features to embed and with which
-                multiplier, keyed by feature name, e.g. `{"sensor_pos_x":
-                4096.0, "t": 4096.0, "charge": 1024.0}`. Names are resolved
-                against `input_feature_names`, so the model reads the right
-                column whatever order the data arrives in, and an unknown
-                name raises rather than silently shifting the multipliers
-                onto neighbouring features. Insertion order fixes the order
-                of the embedded blocks. If not given, the encoder is
-                `FourierEncoderEPJC` with its fixed layout and multipliers,
-                as before.
-            input_feature_names: Names of the input columns in order, needed
-                to resolve `fourier_schema`.
-            spacetime_time_scale: Factor converting the normalised time
-                coordinate into the normalised length unit, `t_scale * c /
-                pos_scale` for the `Detector` in use. The default is the
-                IceCube value; pass 1.0 with a `Detector` that already emits
-                time in length units, such as
-                `NuBenchSpacetimeDetector`.
-            compile_blocks: Wrap the transformer block stack in
-                `torch.compile`. The jagged path issues many small ops per
-                step; compiling the whole stack as one graph is what turns
-                the nested path from slower-than-padded (eager) into
-                faster. No effect on numerics.
+            use_nested_attention: Run the plain blocks on jagged
+                `NestedTensor`s, dropping all compute on padding. The
+                relative blocks are unaffected: their bias needs padding.
+            qk_norm: Per-head RMSNorm on queries and keys in the plain
+                blocks, bounding the growth of the attention logits.
+            use_attn_bias: Add the spacetime bias to the relative blocks'
+                pre-softmax logits, as `<q_i, R_ij>`.
+            use_activation_bias: Add it to their post-softmax output, as
+                `sum_j P_ij R_ij`. Independent of `use_attn_bias`.
+            alibi_bias: Scale the raw signed four-distance by a learned
+                per-head slope instead of embedding it per pair. Being
+                query-independent, the `[L, L]` term is then a closed form of
+                the coordinates rather than an `[L, L, C]` tensor. Disables
+                the activation bias, which has no scalar analogue.
+            spacetime_time_scale: `t_scale * c / pos_scale` for the
+                `Detector` in use. The default is the IceCube value; pass 1.0
+                with `NuBenchSpacetimeDetector`.
+            fourier_schema: `{feature name: multiplier}` for the columns to
+                embed, resolved against `input_feature_names`. Unset, the
+                encoder is `FourierEncoderEPJC` with its fixed layout.
+            input_feature_names: Input column names, in order. Required with
+                `fourier_schema`.
+            compile_blocks: Compile the block stack as one graph. No effect
+                on numerics.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -156,21 +112,23 @@ class DeepIce(GNN):
                 n_features=n_features,
             )
         else:
-            if input_feature_names is None:
+            # Naming the features is what makes a change of input order raise
+            # rather than shift every multiplier onto a neighbouring column.
+            names = input_feature_names or []
+            unknown = set(fourier_schema) - set(names)
+            if unknown:
                 raise ValueError(
-                    "`fourier_schema` names features, so "
-                    "`input_feature_names` is required to resolve them to "
-                    "columns."
+                    f"fourier_schema names {sorted(unknown)}, not among the "
+                    f"input features {names}."
                 )
             self.fourier_ext = FourierEncoder(
-                schema=resolve_fourier_schema(
-                    fourier_schema, input_feature_names
-                ),
+                schema={
+                    names.index(n): float(s) for n, s in fourier_schema.items()
+                },
                 seq_length=seq_length,
                 scaled=scaled_emb,
             )
-            # The projection `FourierEncoderEPJC` keeps internally; it is
-            # problem-specific, so the general encoder leaves it to the model.
+            # The general encoder leaves this projection to the model.
             concat_dim = self.fourier_ext.output_dim
             self.fourier_mlp = nn.Sequential(
                 nn.Linear(concat_dim, concat_dim),
@@ -235,18 +193,12 @@ class DeepIce(GNN):
         self.use_nested_attention = use_nested_attention
         self._blocks_fn: Callable[..., Tensor] = self._run_blocks
         if compile_blocks:
-            # DDP's graph-splitting optimizer overlaps gradient all-reduce by
-            # cutting the dynamo graph at bucket boundaries, but the split
-            # subgraphs lose the jagged NestedTensor's dynamic-shape symbol
-            # and fail to compile (KeyError: s0). Compile the block stack as
-            # one graph instead; DDP still hooks gradients as usual.
+            # DDP's graph splitting loses the jagged tensor's dynamic-shape
+            # symbol and fails to compile (KeyError: s0).
             torch._dynamo.config.optimize_ddp = False
-            # dynamic=True forces a single shape-polymorphic graph. Otherwise a
-            # batch whose max sequence length exceeds every prior one triggers a
-            # recompile, and under DDP that recompile fires on only the ranks
-            # that saw the longer batch -- the others race ahead to the next
-            # all-reduce and the collective deadlocks until the NCCL watchdog
-            # aborts the job.
+            # A single shape-polymorphic graph. Otherwise a longer-than-ever
+            # batch recompiles on only the ranks that saw it, and the next
+            # all-reduce deadlocks.
             self._blocks_fn = torch.compile(self._run_blocks, dynamic=True)
 
     @torch.jit.ignore
@@ -256,11 +208,7 @@ class DeepIce(GNN):
 
     @staticmethod
     def _additive_mask(keep: Tensor) -> Tensor:
-        """Turn a boolean keep-mask into an additive mask.
-
-        Attention takes 0 where a key is kept and -inf where it is
-        masked.
-        """
+        """Turn a boolean keep-mask into the additive mask attention takes."""
         attn_mask = torch.zeros(keep.shape, device=keep.device)
         attn_mask[~keep] = -torch.inf
         return attn_mask
@@ -270,10 +218,9 @@ class DeepIce(GNN):
     ) -> Tensor:
         """Apply the relative-attention stack over padded sequences.
 
-        Only the leading `n_rel` blocks receive the spacetime bias; the rest
-        run as plain attention. With no relative blocks at all the bias is
-        never built -- it is an O(len^2) tensor and would otherwise be the
-        model's dominant cost with nothing consuming it.
+        Only the leading `n_rel` blocks receive the spacetime bias. With no
+        relative blocks the O(len^2) bias is never built, as nothing would
+        consume it.
         """
         if not self.sandwich:
             return x
@@ -289,9 +236,8 @@ class DeepIce(GNN):
     ) -> Tensor:
         """Repack padded `x` as a jagged `NestedTensor`, prepending `cls`.
 
-        Padding positions are dropped, so the blocks never compute on them.
-        Indexing is arithmetic on `batch_idx` rather than boolean masks, which
-        would force a host sync every step.
+        Indexing is arithmetic on `batch_idx` rather than boolean masks,
+        which would force a host sync every step.
         """
         batch_size, max_len, num_features = x.shape
         n_pulses = batch_idx.shape[0]
@@ -310,8 +256,7 @@ class DeepIce(GNN):
         values[offsets[batch_idx] + 1 + pos] = x.reshape(-1, num_features)[
             batch_idx * max_len + pos
         ]
-        # The fused varlen kernels need max_seqlen, and torch.compile requires
-        # it to be present consistently when tracing; `x` is padded to the
+        # The fused varlen kernels need max_seqlen; `x` is padded to the
         # longest event, so `max_len` is exact.
         return torch.nested.nested_tensor_from_jagged(
             values,
@@ -358,10 +303,9 @@ class DeepIce(GNN):
     ) -> Tensor:
         """Apply the plain transformer block stack.
 
-        One method so the whole stack compiles as a single graph rather than
-        one per block. On jagged input the blocks run on the dense value
-        buffer (`Block.forward_jagged`), with the seqlen metadata read once
-        here instead of re-derived per block.
+        One method so the whole stack compiles as a single graph. Jagged
+        input runs on the dense value buffer, with the seqlen metadata
+        read once here rather than per block.
         """
         if x.is_nested:
             offsets = x.offsets()
