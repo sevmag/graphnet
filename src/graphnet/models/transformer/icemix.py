@@ -60,6 +60,9 @@ class DeepIce(GNN):
         ] = None,
         input_feature_names: Optional[List[str]] = None,
         compile_blocks: bool = False,
+        rel_attention: str = "dense",
+        q_tile: int = 64,
+        tiled_checkpoint: bool = True,
     ):
         """Construct `DeepIce`.
 
@@ -111,6 +114,17 @@ class DeepIce(GNN):
                 `fourier_schema`.
             compile_blocks: Compile the block stack as one graph. No effect
                 on numerics.
+            rel_attention: How the relative blocks build their spacetime
+                bias. `"dense"` materialises the whole `[B, L, L, C]` tensor;
+                `"tiled"` builds it one band of query rows at a time, which
+                bounds peak memory at `q_tile * L` without changing the
+                result. Note that tiling bounds memory, not compute: the
+                padded pairs are still formed and then masked.
+            q_tile: Query rows per band when `rel_attention="tiled"`.
+            tiled_checkpoint: Recompute each band in the backward pass. Without
+                it autograd retains every band, which sums to the dense tensor
+                the tiling exists to avoid, so it only saves memory in training
+                when this is set.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -153,6 +167,16 @@ class DeepIce(GNN):
                 nn.GELU(),
                 nn.Linear(concat_dim, fourier_out_dim),
             )
+        if rel_attention not in ("dense", "tiled"):
+            raise ValueError(
+                f"rel_attention must be 'dense' or 'tiled', "
+                f"got {rel_attention!r}"
+            )
+        if rel_attention == "tiled" and alibi_bias:
+            # The tiled path contracts a per-pair feature vector with the
+            # query; ALiBi's bias is a scalar per pair and is consumed by
+            # a different code path, so the two cannot be combined.
+            raise ValueError("rel_attention='tiled' cannot use alibi_bias")
         self.rel_pos: nn.Module = (
             SpacetimeDistance(
                 clip=spacetime_clip, time_scale=spacetime_time_scale
@@ -193,6 +217,9 @@ class DeepIce(GNN):
             ]
         )
         self.n_rel = n_rel
+        self.rel_attention = rel_attention
+        self.q_tile = q_tile
+        self.tiled_checkpoint = tiled_checkpoint
 
         if include_dynedge and dynedge_args is None:
             self.warning_once("Running with default DynEdge settings")
@@ -249,9 +276,20 @@ class DeepIce(GNN):
         """
         if not self.sandwich:
             return x
-        rel_pos_bias = self.rel_pos(x0)
+        tiled = self.rel_attention == "tiled"
+        rel_pos_bias = None if tiled else self.rel_pos(x0)
         for i, blk in enumerate(self.sandwich):
-            x = blk(x, attn_mask, rel_pos_bias)
+            if tiled and i < self.n_rel:
+                x = blk.forward_tiled(
+                    x,
+                    self.rel_pos,
+                    x0,
+                    key_padding_mask=attn_mask,
+                    q_tile=self.q_tile,
+                    use_checkpoint=self.tiled_checkpoint and self.training,
+                )
+            else:
+                x = blk(x, attn_mask, rel_pos_bias)
             if i + 1 == self.n_rel:
                 rel_pos_bias = None
         return x
