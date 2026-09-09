@@ -32,7 +32,14 @@ from pytorch_lightning import LightningModule
 from torch_geometric.utils import degree
 
 if TYPE_CHECKING:
-    from graphnet.models.components.embedding import SpacetimeEncoder
+    from graphnet.models.components.embedding import (
+        SpacetimeEncoder,
+        SpacetimeEncoderEPJC,
+    )
+
+    # Either encoder supplies the bias; they differ in what they let the
+    # caller configure, not in the interface used here.
+    SpacetimeEncoderLike = Union[SpacetimeEncoder, SpacetimeEncoderEPJC]
 
 
 class DynEdgeConv(EdgeConv, LightningModule):
@@ -406,7 +413,7 @@ class Block_rel(LightningModule):
     def forward_tiled(
         self,
         x: Tensor,
-        rel_pos_encoder: "SpacetimeEncoder",
+        rel_pos_encoder: "SpacetimeEncoderLike",
         coords: Tensor,
         key_padding_mask: Optional[Tensor] = None,
         q_tile: int = 64,
@@ -416,12 +423,12 @@ class Block_rel(LightningModule):
 
         Numerically identical to `forward` called with a `rel_pos_bias`
         precomputed as `rel_pos_encoder(coords)`, but the relative bias is
-        built one query-tile at a time so the `[B, L, L, H]` tensor is never 
+        built one query-tile at a time so the `[B, L, L, H]` tensor is never
         fully materialised.
 
         Args:
             x: Input tensor of shape `[B, L, input_dim]`.
-            rel_pos_encoder: The `SpacetimeEncoder` providing the relative
+            rel_pos_encoder: The spacetime encoder providing the relative
                 bias via its `forward_tiled` method.
             coords: Raw coordinates `[B, L, >=4]` (positions 0:3, time
                 3) fed to `rel_pos_encoder`.
@@ -567,7 +574,7 @@ class Attention_rel(LightningModule):
     def forward_tiled(
         self,
         x: Tensor,
-        rel_pos_encoder: "SpacetimeEncoder",
+        rel_pos_encoder: "SpacetimeEncoderLike",
         coords: Tensor,
         key_padding_mask: Optional[Tensor] = None,
         q_tile: int = 64,
@@ -587,7 +594,7 @@ class Attention_rel(LightningModule):
 
         Args:
             x: Input tensor of shape `[B, L, input_dim]`.
-            rel_pos_encoder: The `SpacetimeEncoder` whose `forward_tiled`
+            rel_pos_encoder: The spacetime encoder whose `forward_tiled`
                 supplies the relative bias for a query tile.
             coords: Raw coordinates `[B, L, >=4]` (positions 0:3, time
                 3) fed to `rel_pos_encoder`.
@@ -606,7 +613,9 @@ class Attention_rel(LightningModule):
         num_heads = self.num_heads
         head_dim = self.proj_q.weight.shape[0] // num_heads
 
-        def to_heads(t: Tensor, weight: Tensor, bias: Optional[Tensor]) -> Tensor:
+        def to_heads(
+            t: Tensor, weight: Tensor, bias: Optional[Tensor]
+        ) -> Tensor:
             return (
                 linear(t, weight, bias)
                 .reshape(batch_size, event_length, num_heads, head_dim)
