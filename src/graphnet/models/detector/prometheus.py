@@ -232,7 +232,10 @@ class ARCA115Realistic(Detector):
     on an up- rather than down-facing PMT means something different, and a
     model given only the module position cannot tell the two apart.
 
-    Expected features: `x`, `y`, `z`, `dir_x`, `dir_y`, `dir_z`, `t`, `tot`.
+    Expected features: `dom_x`, `dom_y`, `dom_z`, `dir_x`, `dir_y`, `dir_z`,
+    `t`, `tot`. The positions are named `dom_*` rather than `x`, `y`, `z`
+    because `Data.x` is reserved for the node feature matrix, and a feature
+    called `x` is silently dropped from the graph's named fields.
     Positions and directions are carried per hit rather than joined from
     `geometry_table`, which indexes modules by a 0-based string and a global
     sensor number where the simulation labels them 1-based per string.
@@ -245,16 +248,16 @@ class ARCA115Realistic(Detector):
     geometry_table_path = os.path.join(
         PROMETHEUS_GEOMETRY_TABLE_DIR, "arca.parquet"
     )
-    xyz = ["x", "y", "z"]
+    xyz = ["dom_x", "dom_y", "dom_z"]
     string_id_column = "sensor_string_id"
     sensor_id_column = "sensor_id"
 
     def feature_map(self) -> Dict[str, Callable]:
         """Map standardization functions to each dimension."""
         feature_map = {
-            "x": self._xy,
-            "y": self._xy,
-            "z": self._z,
+            "dom_x": self._xy,
+            "dom_y": self._xy,
+            "dom_z": self._z,
             "dir_x": self._identity,
             "dir_y": self._identity,
             "dir_z": self._identity,
