@@ -1,6 +1,6 @@
 """Attention and transformer blocks used in graphnet models."""
 
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Optional, Tuple, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,14 @@ from pytorch_lightning import LightningModule
 
 from graphnet.models.components.embedding import RoPE4D
 if TYPE_CHECKING:
-    from graphnet.models.components.embedding import SpacetimeEncoder
+    from graphnet.models.components.embedding import (
+        SpacetimeEncoder,
+        SpacetimeEncoderEPJC,
+    )
+
+    # Either encoder supplies the bias; they differ in what they let the
+    # caller configure, not in the interface used here.
+    SpacetimeEncoderLike = Union[SpacetimeEncoder, SpacetimeEncoderEPJC]
 
 
 class DropPath(LightningModule):
@@ -260,7 +267,7 @@ class Attention_rel(LightningModule):
     def forward_tiled(
         self,
         x: Tensor,
-        rel_pos_encoder: "SpacetimeEncoder",
+        rel_pos_encoder: "SpacetimeEncoderLike",
         coords: Tensor,
         key_padding_mask: Optional[Tensor] = None,
         q_tile: int = 64,
@@ -280,7 +287,7 @@ class Attention_rel(LightningModule):
 
         Args:
             x: Input tensor of shape `[B, L, input_dim]`.
-            rel_pos_encoder: The `SpacetimeEncoder` whose `forward_tiled`
+            rel_pos_encoder: The spacetime encoder whose `forward_tiled`
                 supplies the relative bias for a query tile.
             coords: Raw coordinates `[B, L, >=4]` (positions 0:3, time
                 3) fed to `rel_pos_encoder`.
@@ -500,7 +507,7 @@ class Block_rel(LightningModule):
     def forward_tiled(
         self,
         x: Tensor,
-        rel_pos_encoder: "SpacetimeEncoder",
+        rel_pos_encoder: "SpacetimeEncoderLike",
         coords: Tensor,
         key_padding_mask: Optional[Tensor] = None,
         q_tile: int = 64,
@@ -515,7 +522,7 @@ class Block_rel(LightningModule):
 
         Args:
             x: Input tensor of shape `[B, L, input_dim]`.
-            rel_pos_encoder: The `SpacetimeEncoder` providing the relative
+            rel_pos_encoder: The spacetime encoder providing the relative
                 bias via its `forward_tiled` method.
             coords: Raw coordinates `[B, L, >=4]` (positions 0:3, time
                 3) fed to `rel_pos_encoder`.
