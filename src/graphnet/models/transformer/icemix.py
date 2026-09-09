@@ -9,7 +9,7 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, List, Optional, Callable
+from typing import Set, Dict, Any, List, Optional, Tuple, Union, Callable
 
 from graphnet.models.components.layers import (
     Block_rel,
@@ -52,7 +52,12 @@ class DeepIce(GNN):
         use_activation_bias: bool = True,
         alibi_bias: bool = False,
         spacetime_time_scale: float = 3e4 / 500 * 3e-1,
-        fourier_schema: Optional[Dict[str, float]] = None,
+        spacetime_scale: float = 1024.0,
+        spacetime_n_freq: float = 10000.0,
+        spacetime_clip: float = 4.0,
+        fourier_schema: Optional[
+            Dict[str, Union[float, Tuple[float, float]]]
+        ] = None,
         input_feature_names: Optional[List[str]] = None,
         compile_blocks: bool = False,
     ):
@@ -92,7 +97,14 @@ class DeepIce(GNN):
             spacetime_time_scale: `t_scale * c / pos_scale` for the
                 `Detector` in use. The default is the IceCube value; pass 1.0
                 with `NuBenchSpacetimeDetector`.
-            fourier_schema: `{feature name: multiplier}` for the columns to
+            spacetime_scale: Multiplier on the four-distance before its
+                sinusoidal ladder. With `spacetime_n_freq` it sets the band
+                of separations the bias resolves: wavelengths from
+                `2 * pi / spacetime_scale` up, in the normalised length unit.
+            spacetime_n_freq: Span of that ladder.
+            spacetime_clip: Bound on the four-distance before embedding.
+            fourier_schema: `{feature name: multiplier}` or
+                `{feature name: (multiplier, n_freq)}` for the columns to
                 embed, resolved against `input_feature_names`. Unset, the
                 encoder is `FourierEncoderEPJC` with its fixed layout.
             input_feature_names: Input column names, in order. Required with
@@ -123,7 +135,12 @@ class DeepIce(GNN):
                 )
             self.fourier_ext = FourierEncoder(
                 schema={
-                    names.index(n): float(s) for n, s in fourier_schema.items()
+                    names.index(n): (
+                        (float(v[0]), float(v[1]))
+                        if isinstance(v, (tuple, list))
+                        else float(v)
+                    )
+                    for n, v in fourier_schema.items()
                 },
                 seq_length=seq_length,
                 scaled=scaled_emb,
@@ -137,9 +154,17 @@ class DeepIce(GNN):
                 nn.Linear(concat_dim, fourier_out_dim),
             )
         self.rel_pos: nn.Module = (
-            SpacetimeDistance(time_scale=spacetime_time_scale)
+            SpacetimeDistance(
+                clip=spacetime_clip, time_scale=spacetime_time_scale
+            )
             if alibi_bias
-            else SpacetimeEncoder(head_size, time_scale=spacetime_time_scale)
+            else SpacetimeEncoder(
+                head_size,
+                time_scale=spacetime_time_scale,
+                scale=spacetime_scale,
+                clip=spacetime_clip,
+                n_freq=spacetime_n_freq,
+            )
         )
         self.sandwich = nn.ModuleList(
             [
