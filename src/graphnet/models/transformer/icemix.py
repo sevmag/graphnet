@@ -119,7 +119,10 @@ class DeepIce(GNN):
                 bias. `"dense"` materialises the whole `[B, L, L, C]` tensor;
                 `"tiled"` builds it one band of query rows at a time, which
                 bounds peak memory at `q_tile * L` without changing the
-                result. Note that tiling bounds memory, not compute: the
+                result. `"flash"` runs a fused Triton kernel that never
+                materialises the pair tensor at all and consumes the
+                sequence packed rather than padded; it requires a GPU and
+                reproduces the spacetime encoder's shipped constants only. Note that tiling bounds memory, not compute: the
                 padded pairs are still formed and then masked.
             q_tile: Query rows per band when `rel_attention="tiled"`.
             tiled_checkpoint: Recompute each band in the backward pass. Without
@@ -175,10 +178,10 @@ class DeepIce(GNN):
                 nn.GELU(),
                 nn.Linear(concat_dim, fourier_out_dim),
             )
-        if rel_attention not in ("dense", "tiled"):
+        if rel_attention not in ("dense", "tiled", "flash"):
             raise ValueError(
-                f"rel_attention must be 'dense' or 'tiled', "
-                f"got {rel_attention!r}"
+                f"rel_attention must be 'dense', 'tiled' or "
+                f"'flash', got {rel_attention!r}"
             )
         if rel_attention == "tiled" and alibi_bias:
             # The tiled path contracts a per-pair feature vector with the
@@ -284,7 +287,7 @@ class DeepIce(GNN):
         return attn_mask
 
     def _run_rel_blocks(
-        self, x: Tensor, x0: Tensor, attn_mask: Tensor
+        self, x: Tensor, x0: Tensor, attn_mask: Tensor, seq_length: Tensor
     ) -> Tensor:
         """Apply the relative-attention stack over padded sequences.
 
@@ -293,6 +296,15 @@ class DeepIce(GNN):
         consume it.
         """
         if not self.sandwich:
+            return x
+        if self.rel_attention == "flash":
+            # The fused kernel recomputes the pair features per tile, so it
+            # needs the raw coordinates and the unpadded lengths rather than
+            # a materialised bias or a padding mask.
+            for i, blk in enumerate(self.sandwich):
+                x = blk.forward_flash(
+                    x, x0, seq_length, self.rel_pos, use_bias=i < self.n_rel
+                )
             return x
         tiled = self.rel_attention == "tiled"
         rel_pos_bias = None if tiled else self.rel_pos(x0)
@@ -407,7 +419,9 @@ class DeepIce(GNN):
             graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
 
-        x = self._run_rel_blocks(x, x0, self._additive_mask(mask, x.dtype))
+        x = self._run_rel_blocks(
+            x, x0, self._additive_mask(mask, x.dtype), seq_length
+        )
 
         if self.use_nested_attention:
             if self.pooling == "mean":
