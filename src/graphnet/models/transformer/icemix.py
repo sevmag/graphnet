@@ -259,9 +259,14 @@ class DeepIce(GNN):
         return {"cls_token"}
 
     @staticmethod
-    def _additive_mask(keep: Tensor) -> Tensor:
-        """Turn a boolean keep-mask into the additive mask attention takes."""
-        attn_mask = torch.zeros(keep.shape, device=keep.device)
+    def _additive_mask(keep: Tensor, dtype: torch.dtype) -> Tensor:
+        """Turn a boolean keep-mask into the additive mask attention takes.
+
+        The mask must carry the dtype of the activations it will be added
+        to: attention reads a float mask as data, and a mismatched one is
+        silently misread rather than promoted.
+        """
+        attn_mask = torch.zeros(keep.shape, device=keep.device, dtype=dtype)
         attn_mask[~keep] = -torch.inf
         return attn_mask
 
@@ -341,7 +346,7 @@ class DeepIce(GNN):
             graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
 
-        x = self._run_rel_blocks(x, x0, self._additive_mask(mask))
+        x = self._run_rel_blocks(x, x0, self._additive_mask(mask, x.dtype))
 
         if self.use_nested_attention:
             x = self._blocks_fn(
@@ -355,7 +360,7 @@ class DeepIce(GNN):
         )
         keep = torch.cat([mask.new_ones((mask.shape[0], 1)), mask], 1)
         x = self._blocks_fn(
-            torch.cat([cls_token, x], 1), self._additive_mask(keep)
+            torch.cat([cls_token, x], 1), self._additive_mask(keep, x.dtype)
         )
         return x[:, 0]
 
