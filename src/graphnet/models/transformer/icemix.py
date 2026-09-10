@@ -21,6 +21,12 @@ from graphnet.models.components.embedding import (
     SpacetimeDistance,
     SpacetimeEncoder,
 )
+from graphnet.models.components.flash_spacetime import (
+    TIME_SCALE,
+    SINEMB_INPUT_SCALE,
+    SINEMB_CLIP,
+    SINEMB_N_FREQ,
+)
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
 from graphnet.models.utils import array_to_sequence
@@ -183,6 +189,25 @@ class DeepIce(GNN):
                 f"rel_attention must be 'dense', 'tiled' or "
                 f"'flash', got {rel_attention!r}"
             )
+        if rel_attention == "flash":
+            # The kernel rebuilds the pair angle from raw coordinates with
+            # the band compiled in, so a model configured for a different
+            # band would train against a bias it never asked for.
+            baked = {
+                "spacetime_time_scale": (spacetime_time_scale, TIME_SCALE),
+                "spacetime_scale": (spacetime_scale, SINEMB_INPUT_SCALE),
+                "spacetime_clip": (spacetime_clip, SINEMB_CLIP),
+                "spacetime_n_freq": (spacetime_n_freq, SINEMB_N_FREQ),
+            }
+            off = {
+                name: got for name, (got, want) in baked.items() if got != want
+            }
+            if off or alibi_bias:
+                raise ValueError(
+                    "rel_attention='flash' compiles the spacetime band in, "
+                    f"so it needs the shipped values and no alibi_bias; got "
+                    f"{off or 'alibi_bias=True'}"
+                )
         if rel_attention == "tiled" and alibi_bias:
             # The tiled path contracts a per-pair feature vector with the
             # query; ALiBi's bias is a scalar per pair and is consumed by

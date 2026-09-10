@@ -21,6 +21,10 @@ import torch
 from graphnet.models.components.embedding import SpacetimeEncoder
 from graphnet.models.components.layers import Attention_rel
 from graphnet.models.components.flash_spacetime import (
+    SINEMB_CLIP,
+    SINEMB_INPUT_SCALE,
+    SINEMB_N_FREQ,
+    TIME_SCALE,
     attention_rel_oracle_inputs,
     float_padding_mask,
     merge_heads,
@@ -28,6 +32,22 @@ from graphnet.models.components.flash_spacetime import (
     spacetime_pair_features,
     valid_row_mask,
 )
+
+
+def _epjc_encoder(dim: int) -> SpacetimeEncoder:
+    """The encoder on the band the reference and the kernel assume.
+
+    `SpacetimeEncoder` states its band rather than assuming one, so the
+    EPJC values have to be named here instead of coming from its defaults.
+    """
+    return SpacetimeEncoder(
+        dim,
+        time_scale=TIME_SCALE,
+        scale=SINEMB_INPUT_SCALE,
+        clip=SINEMB_CLIP,
+        n_freq=SINEMB_N_FREQ,
+    )
+
 
 # float64 round-off through ~L-long reductions; forward and gradients alike.
 ATOL = 1e-11
@@ -68,7 +88,7 @@ def _make_modules(
     torch.manual_seed(seed + 1)
     hidden = num_heads * head_dim
     use_attn_bias, use_activation_bias = flags
-    spacetime = SpacetimeEncoder(head_dim).double()
+    spacetime = _epjc_encoder(head_dim).double()
     attention = Attention_rel(
         hidden,
         num_heads,
@@ -211,7 +231,7 @@ def test_reference_matches_modules_backward(
 def test_pair_features_match_spacetime_encoder() -> None:
     """`spacetime_pair_features` == `SpacetimeEncoder.forward` (fp64)."""
     torch.manual_seed(7)
-    spacetime = SpacetimeEncoder(48).double()
+    spacetime = _epjc_encoder(48).double()
     feats = torch.randn(3, 33, 5, dtype=torch.float64)
     torch.testing.assert_close(
         spacetime_pair_features(
