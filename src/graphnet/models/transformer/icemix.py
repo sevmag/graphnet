@@ -67,6 +67,7 @@ class DeepIce(GNN):
         rel_attention: str = "dense",
         q_tile: int = 64,
         tiled_checkpoint: bool = True,
+        pooling: str = "cls",
     ):
         """Construct `DeepIce`.
 
@@ -131,14 +132,24 @@ class DeepIce(GNN):
                 `fourier_schema`.
             compile_blocks: Compile the block stack as one graph. No effect
                 on numerics.
-            rel_attention: How the relative-attention sandwich computes its
-                spacetime bias. `"dense"` (default) precomputes the full
-                `[B, L, L, H]` bias (original behaviour). `"tiled"` computes
-                the bias one query-tile at a time.
-            q_tile: Number of query rows per tile when `rel_attention="tiled"`.
-            tiled_checkpoint: When `rel_attention="tiled"`, recompute each tile
-                in the backward pass (during training) at the cost of one
-                extra forward.
+            rel_attention: How the relative blocks build their spacetime
+                bias. `"dense"` materialises the whole `[B, L, L, C]` tensor;
+                `"tiled"` builds it one band of query rows at a time, which
+                bounds peak memory at `q_tile * L` without changing the
+                result. Note that tiling bounds memory, not compute: the
+                padded pairs are still formed and then masked.
+            q_tile: Query rows per band when `rel_attention="tiled"`.
+            tiled_checkpoint: Recompute each band in the backward pass. Without
+                it autograd retains every band, which sums to the dense tensor
+                the tiling exists to avoid, so it only saves memory in training
+                when this is set.
+            pooling: How the per-pulse embeddings become the one event
+                vector the task head reads. `"cls"` prepends a learned token
+                to the plain blocks and returns its output; `"mean"` averages
+                the real pulses and runs no extra token. The `cls_token`
+                parameter exists either way, so a checkpoint loads under both
+                settings -- but under `"mean"` it receives no gradient, which
+                DDP rejects without `find_unused_parameters=True`.
         """
         if rel_attention not in ("dense", "tiled"):
             raise ValueError(
@@ -264,6 +275,11 @@ class DeepIce(GNN):
                 for i in range(depth)
             ]
         )
+        if pooling not in ("cls", "mean"):
+            raise ValueError(
+                f"pooling must be 'cls' or 'mean', got {pooling!r}"
+            )
+        self.pooling = pooling
         self.n_rel = n_rel
 
         if include_dynedge and dynedge_args is None:
@@ -392,6 +408,54 @@ class DeepIce(GNN):
             max_seqlen=max_len + 1,
         )
 
+    def _to_nested(
+        self, x: Tensor, batch_idx: Tensor, seq_length: Tensor
+    ) -> Tensor:
+        """Repack padded `x` as a jagged `NestedTensor`.
+
+        Indexing is arithmetic on `batch_idx` rather than boolean masks,
+        which would force a host sync every step.
+        """
+        _, max_len, num_features = x.shape
+        offsets = torch.zeros(
+            seq_length.shape[0] + 1, dtype=torch.long, device=x.device
+        )
+        offsets[1:] = torch.cumsum(seq_length, dim=0)
+        # Position of each pulse within its event.
+        pos = (
+            torch.arange(batch_idx.shape[0], device=x.device)
+            - offsets[batch_idx]
+        )
+        values = x.reshape(-1, num_features)[batch_idx * max_len + pos]
+        # The fused varlen kernels need max_seqlen; `x` is padded to the
+        # longest event, so `max_len` is exact.
+        return torch.nested.nested_tensor_from_jagged(
+            values,
+            offsets,
+            min_seqlen=1,
+            max_seqlen=max_len,
+        )
+
+    @staticmethod
+    def _mean_pool(
+        values: Tensor, batch_idx: Tensor, seq_length: Tensor
+    ) -> Tensor:
+        """Average each event's rows of a packed `[N, D]` buffer.
+
+        `index_add_` rather than a boolean gather, which would force a host
+        sync every step. The accumulation is float32 whatever the autocast
+        dtype: a bfloat16 sum over hundreds of pulses loses several bits to
+        rounding.
+        """
+        total = torch.zeros(
+            seq_length.shape[0],
+            values.shape[-1],
+            dtype=torch.float32,
+            device=values.device,
+        )
+        total.index_add_(0, batch_idx, values.float())
+        return (total / seq_length.unsqueeze(-1)).to(values.dtype)
+
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
         x0, mask, seq_length = array_to_sequence(
@@ -415,18 +479,29 @@ class DeepIce(GNN):
         )
 
         if self.use_nested_attention:
+            if self.pooling == "mean":
+                x = self._blocks_fn(self._to_nested(x, data.batch, seq_length))
+                return self._mean_pool(x.values(), data.batch, seq_length)
             x = self._blocks_fn(
                 self._to_nested_with_cls(x, data.batch, seq_length)
             )
             # each event's cls output sits at its sequence start
             return x.values()[x.offsets()[:-1]]
 
+        if self.pooling == "mean":
+            x = self._blocks_fn(x, self._additive_mask(mask, x.dtype))
+            # float32 accumulation: a bfloat16 sum over hundreds of pulses
+            # loses several bits to rounding.
+            total = (x * mask.unsqueeze(-1)).sum(1, dtype=torch.float32)
+            return (total / seq_length.unsqueeze(-1)).to(x.dtype)
+
         cls_token = self.cls_token.weight.unsqueeze(0).expand(
             mask.shape[0], -1, -1
         )
         keep = torch.cat([mask.new_ones((mask.shape[0], 1)), mask], 1)
         x = self._blocks_fn(
-            torch.cat([cls_token, x], 1), self._additive_mask(keep, x.dtype)
+            torch.cat([cls_token, x], 1),
+            self._additive_mask(keep, x.dtype),
         )
         return x[:, 0]
 
