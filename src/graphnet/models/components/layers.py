@@ -595,9 +595,8 @@ class Attention_rel(LightningModule):
             attn = attn + bias
         if key_padding_mask is not None:
             assert (
-                key_padding_mask.dtype == torch.float32
-                or key_padding_mask.dtype == torch.float16
-            ), "incorrect mask dtype"
+                key_padding_mask.is_floating_point()
+            ), "key_padding_mask must be additive, i.e. a float mask"
             bias = torch.min(
                 key_padding_mask[:, None, :], key_padding_mask[:, :, None]
             )
@@ -678,9 +677,8 @@ class Attention_rel(LightningModule):
         pair_bias = None
         if key_padding_mask is not None:
             assert (
-                key_padding_mask.dtype == torch.float32
-                or key_padding_mask.dtype == torch.float16
-            ), "incorrect mask dtype"
+                key_padding_mask.is_floating_point()
+            ), "key_padding_mask must be additive, i.e. a float mask"
             pair_bias = torch.min(
                 key_padding_mask[:, None, :], key_padding_mask[:, :, None]
             )
