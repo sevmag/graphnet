@@ -459,7 +459,7 @@ def flash_spacetime_forward(
     num_warps: int = 8,
     num_stages: int = 1,
     cu_seqlens: Optional[Tensor] = None,
-) -> Tuple[Tensor, Tensor]:
+) -> Tuple[Tensor, ...]:
     """Fused forward. Returns (O [B,H,L,D] with pad rows zeroed, LSE).
 
     Inputs follow `spacetime_attention_reference`; `seqlens` is the [B]
@@ -516,12 +516,18 @@ def flash_spacetime_forward(
     # term, the rounding is dithered as it is in the eager path. The kernel
     # stores into whatever dtype the buffer has.
     single_round = os.environ.get("FLASH_ST_SINGLE_ROUND") == "1"
+    # The backward reads the output only through dl = rowsum(dO * out); with
+    # this switch it reads the fp32 sum while the model still receives the
+    # same bf16 output as without it, so the forward is unchanged for the
+    # model and only what the backward sees differs.
+    fp32_dl = os.environ.get("FLASH_ST_FP32_DL") == "1"
+    keep_fp32 = single_round or fp32_dl
     o1 = (
         torch.zeros(qc.shape, device=q.device, dtype=torch.float32)
-        if single_round
+        if keep_fp32
         else torch.zeros_like(qc)
     )
-    acc_dtype = torch.float32 if single_round else q.dtype
+    acc_dtype = torch.float32 if keep_fp32 else q.dtype
     if packed:
         ae = (
             torch.zeros(qc.shape, device=q.device, dtype=acc_dtype)
@@ -582,27 +588,36 @@ def flash_spacetime_forward(
         num_stages=num_stages,
     )
 
-    out = o1
+    # What the model receives. Without the single-rounding switch this is
+    # the shipped assembly: the attention output and the bias term each
+    # rounded to the model dtype, then added -- reproduced here from the
+    # fp32 accumulators by rounding the same values the kernel would have
+    # stored, so the model's output does not depend on the switches.
+    o1_model = o1 if not keep_fp32 or single_round else o1.to(qc.dtype)
+    ae_model = ae if not keep_fp32 or single_round else ae.to(qc.dtype)
+    out = o1_model
+    out32 = o1 if fp32_dl else None
     if use_activation_bias:
-        o2 = ae.to(torch.float32) @ weight.to(torch.float32).t()
+        o2 = ae_model.to(torch.float32) @ weight.to(torch.float32).t()
+        o2_32 = ae.to(torch.float32) @ weight.to(torch.float32).t()
         if bias is not None:
             o2 = o2 + bias.to(torch.float32)
-        if packed:
-            # Every packed row is a real token; nothing to re-zero.
-            out = out + (o2 if single_round else o2.to(out.dtype))
-        else:
+            o2_32 = o2_32 + bias.to(torch.float32)
+        if not packed:
             # Pad rows must stay exactly zero after the +bias broadcast.
             idx = torch.arange(length, device=q.device)
             valid = (idx.unsqueeze(0) < seqlens.unsqueeze(1))[:, None, :, None]
-            o2v = o2 * valid
-            out = out + (o2v if single_round else o2v.to(out.dtype))
-    # The output the backward reads enters it only through
-    # dl = rowsum(dO * out); on diffuse rows the true output is nearly the
-    # same vector everywhere, so any bf16 cast of it is a constant that dl
-    # would inherit. Under the switch the fp32 sum is returned and the
-    # autograd wrapper hands the model its bf16 cast while keeping this.
-    if single_round and os.environ.get("FLASH_ST_FP32_DL") != "1":
+            o2 = o2 * valid
+            o2_32 = o2_32 * valid
+        out = out + (o2 if single_round else o2.to(out.dtype))
+        if out32 is not None:
+            out32 = out32 + o2_32
+    if single_round:
         out = out.to(qc.dtype)
+    # With the fp32-dl switch the autograd wrapper receives the exact fp32
+    # sum and hands the model the bf16 output assembled above.
+    if out32 is not None:
+        return out32, lse, out
     return out, lse
 
 
@@ -642,7 +657,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             if os.environ.get("FLASH_ST_STOCHASTIC_U") == "1"
             else None
         )
-        out, lse = flash_spacetime_forward(
+        fwd = flash_spacetime_forward(
             q,
             k,
             v,
@@ -656,6 +671,10 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             u_seed=u_seed,
         )
+        # A third value is the model-facing output when the backward is to
+        # read the fp32 sum instead.
+        out, lse = fwd[0], fwd[1]
+        out_model = fwd[2] if len(fwd) == 3 else out
         ctx.u_seed = u_seed
         ctx.save_for_backward(
             q,
@@ -673,7 +692,9 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
         ctx.packed = cu_seqlens is not None
         ctx.scale = scale
         ctx.flags = (use_attn_bias, use_activation_bias)
-        return out if out.dtype == q.dtype else out.to(q.dtype)
+        return (
+            out_model if out_model.dtype == q.dtype else out_model.to(q.dtype)
+        )
 
     @staticmethod
     def backward(  # type: ignore[override]
