@@ -15,6 +15,7 @@ data\_representation
    :maxdepth: 2
 
    graphnet.models.data_representation.graphs
+   graphnet.models.data_representation.images
 
 |start-h2| Submodules |end-h2|
 

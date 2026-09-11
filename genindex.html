@@ -432,7 +432,7 @@
 </li>
       <li><a href="api/graphnet.data.utilities.sqlite_utilities.html#graphnet.data.utilities.sqlite_utilities.attach_index">attach_index() (in module graphnet.data.utilities.sqlite_utilities)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Attention_rel">Attention_rel (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Attention_rel">Attention_rel (class in graphnet.models.components.attention_blocks)</a>
 </li>
       <li><a href="api/graphnet.models.coarsening.html#graphnet.models.coarsening.AttributeCoarsening">AttributeCoarsening (class in graphnet.models.coarsening)</a>
 </li>
@@ -462,19 +462,21 @@
 </li>
       <li><a href="api/graphnet.models.task.classification.html#graphnet.models.task.classification.BinaryClassificationTask">BinaryClassificationTask (class in graphnet.models.task.classification)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.models.task.classification.html#graphnet.models.task.classification.BinaryClassificationTaskLogits">BinaryClassificationTaskLogits (class in graphnet.models.task.classification)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.training.loss_functions.html#graphnet.training.loss_functions.BinaryCrossEntropyLoss">BinaryCrossEntropyLoss (class in graphnet.training.loss_functions)</a>
 </li>
       <li><a href="api/graphnet.training.weight_fitting.html#graphnet.training.weight_fitting.BjoernLow">BjoernLow (class in graphnet.training.weight_fitting)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Block">Block (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Block">Block (class in graphnet.models.components.attention_blocks)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Block_rel">Block_rel (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Block_rel">Block_rel (class in graphnet.models.components.attention_blocks)</a>
 </li>
       <li><a href="api/graphnet.data.extractors.icecube.utilities.types.html#graphnet.data.extractors.icecube.utilities.types.break_cyclic_recursion">break_cyclic_recursion() (in module graphnet.data.extractors.icecube.utilities.types)</a>
+</li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.cnn_mapping_tables.html#graphnet.models.data_representation.images.mappings.cnn_mapping_tables.build_ic86_cnn_mapping">build_ic86_cnn_mapping() (in module graphnet.models.data_representation.images.mappings.cnn_mapping_tables)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -516,6 +518,8 @@
 </li>
       <li><a href="api/graphnet.models.data_representation.graphs.nodes.nodes.html#graphnet.models.data_representation.graphs.nodes.nodes.ClusterSummaryFeatures">ClusterSummaryFeatures (class in graphnet.models.data_representation.graphs.nodes.nodes)</a>
 </li>
+      <li><a href="api/graphnet.models.cnn.cnn.html#graphnet.models.cnn.cnn.CNN">CNN (class in graphnet.models.cnn.cnn)</a>
+</li>
       <li><a href="api/graphnet.models.coarsening.html#graphnet.models.coarsening.Coarsening">Coarsening (class in graphnet.models.coarsening)</a>
 </li>
       <li><a href="api/graphnet.data.dataloader.html#graphnet.data.dataloader.collate_fn">collate_fn() (in module graphnet.data.dataloader)</a>
@@ -530,12 +534,20 @@
 </li>
       <li><a href="api/graphnet.data.extractors.combine_extractors.html#graphnet.data.extractors.combine_extractors.CombinedExtractor">CombinedExtractor (class in graphnet.data.extractors.combine_extractors)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.data.curated_datamodule.html#graphnet.data.curated_datamodule.CuratedDataset.comments">comments (graphnet.data.curated_datamodule.CuratedDataset property)</a>
 
       <ul>
         <li><a href="api/graphnet.datasets.nubench_datasets.html#graphnet.datasets.nubench_datasets.NuBenchSpec.comments">(graphnet.datasets.nubench_datasets.NuBenchSpec attribute)</a>
+</li>
+      </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition.compatible_detectors">compatible_detectors (graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition property)</a>
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition.compatible_detectors">(graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition property)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition.compatible_detectors">(graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition property)</a>
 </li>
       </ul></li>
       <li><a href="api/graphnet.models.easy_model.html#graphnet.models.easy_model.EasySyntax.compute_loss">compute_loss() (graphnet.models.easy_model.EasySyntax method)</a>
@@ -563,6 +575,8 @@
       <li><a href="api/graphnet.data.extractors.icecube.utilities.containments.html#graphnet.data.extractors.icecube.utilities.containments.GN_containment_types.contained">contained (graphnet.data.extractors.icecube.utilities.containments.GN_containment_types attribute)</a>
 </li>
       <li><a href="api/graphnet.utilities.argparse.html#graphnet.utilities.argparse.Options.contains">contains() (graphnet.utilities.argparse.Options method)</a>
+</li>
+      <li><a href="api/graphnet.models.components.cnn_convolutions.html#graphnet.models.components.cnn_convolutions.Conv3dBN">Conv3dBN (class in graphnet.models.components.cnn_convolutions)</a>
 </li>
       <li><a href="api/graphnet.models.gnn.convnet.html#graphnet.models.gnn.convnet.ConvNet">ConvNet (class in graphnet.models.gnn.convnet)</a>
 </li>
@@ -732,6 +746,8 @@
 </li>
       <li><a href="api/graphnet.models.detector.detector.html#graphnet.models.detector.detector.Detector">Detector (class in graphnet.models.detector.detector)</a>
 </li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition.detector">detector (graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition property)</a>
+</li>
       <li><a href="api/graphnet.datasets.nubench_datasets.html#graphnet.datasets.nubench_datasets.NuBenchSpec.detector_cls">detector_cls (graphnet.datasets.nubench_datasets.NuBenchSpec attribute)</a>
 </li>
       <li><a href="api/graphnet.training.labels.html#graphnet.training.labels.Direction">Direction (class in graphnet.training.labels)</a>
@@ -744,19 +760,19 @@
 </li>
       <li><a href="api/graphnet.models.coarsening.html#graphnet.models.coarsening.DOMCoarsening">DOMCoarsening (class in graphnet.models.coarsening)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DropPath">DropPath (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.DropPath">DropPath (class in graphnet.models.components.attention_blocks)</a>
 </li>
       <li><a href="api/graphnet.utilities.config.base_config.html#graphnet.utilities.config.base_config.BaseConfig.dump">dump() (graphnet.utilities.config.base_config.BaseConfig method)</a>
 </li>
       <li><a href="api/graphnet.models.gnn.dynedge.html#graphnet.models.gnn.dynedge.DynEdge">DynEdge (class in graphnet.models.gnn.dynedge)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DynEdgeConv">DynEdgeConv (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.DynEdgeConv">DynEdgeConv (class in graphnet.models.components.edge_convolutions)</a>
 </li>
       <li><a href="api/graphnet.models.gnn.dynedge_jinst.html#graphnet.models.gnn.dynedge_jinst.DynEdgeJINST">DynEdgeJINST (class in graphnet.models.gnn.dynedge_jinst)</a>
 </li>
       <li><a href="api/graphnet.models.gnn.dynedge_kaggle_tito.html#graphnet.models.gnn.dynedge_kaggle_tito.DynEdgeTITO">DynEdgeTITO (class in graphnet.models.gnn.dynedge_kaggle_tito)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DynTrans">DynTrans (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.DynTrans">DynTrans (class in graphnet.models.components.edge_convolutions)</a>
 </li>
   </ul></td>
 </tr></table>
@@ -768,7 +784,7 @@
 </li>
       <li><a href="api/graphnet.models.easy_model.html#graphnet.models.easy_model.EasySyntax">EasySyntax (class in graphnet.models.easy_model)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.EdgeConvTito">EdgeConvTito (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.EdgeConvTito">EdgeConvTito (class in graphnet.models.components.edge_convolutions)</a>
 </li>
       <li><a href="api/graphnet.models.data_representation.graphs.edges.edges.html#graphnet.models.data_representation.graphs.edges.edges.EdgeDefinition">EdgeDefinition (class in graphnet.models.data_representation.graphs.edges.edges)</a>
 </li>
@@ -794,10 +810,10 @@
 </li>
       <li><a href="api/graphnet.utilities.logging.html#graphnet.utilities.logging.Logger.error">error() (graphnet.utilities.logging.Logger method)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.training.loss_functions.html#graphnet.training.loss_functions.EuclideanDistanceLoss">EuclideanDistanceLoss (class in graphnet.training.loss_functions)</a>
 </li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.models.data_representation.graphs.edges.edges.html#graphnet.models.data_representation.graphs.edges.edges.EuclideanEdges">EuclideanEdges (class in graphnet.models.data_representation.graphs.edges.edges)</a>
 </li>
       <li><a href="api/graphnet.data.dataclasses.html#graphnet.data.dataclasses.SQLiteFileSet.event_nos">event_nos (graphnet.data.dataclasses.SQLiteFileSet attribute)</a>
@@ -810,6 +826,10 @@
       </ul></li>
       <li><a href="api/graphnet.data.curated_datamodule.html#graphnet.data.curated_datamodule.CuratedDataset.events">events (graphnet.data.curated_datamodule.CuratedDataset property)</a>
 </li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition">ExamplePrometheusGridDefinition (class in graphnet.models.data_representation.images.mappings.grid_definition)</a>
+</li>
+      <li><a href="api/graphnet.models.data_representation.images.images.html#graphnet.models.data_representation.images.images.ExamplePrometheusImage">ExamplePrometheusImage (class in graphnet.models.data_representation.images.images)</a>
+</li>
       <li><a href="api/graphnet.data.extractors.extractor.html#graphnet.data.extractors.extractor.Extractor.exclude">exclude() (graphnet.data.extractors.extractor.Extractor method)</a>
 </li>
       <li><a href="api/graphnet.data.writers.graphnet_writer.html#graphnet.data.writers.graphnet_writer.GraphNeTWriter.expects_merged_dataframes">expects_merged_dataframes (graphnet.data.writers.graphnet_writer.GraphNeTWriter property)</a>
@@ -820,7 +840,7 @@
         <li><a href="api/graphnet.datasets.nubench_datasets.html#graphnet.datasets.nubench_datasets.NuBenchSpec.experiment">(graphnet.datasets.nubench_datasets.NuBenchSpec attribute)</a>
 </li>
       </ul></li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DropPath.extra_repr">extra_repr() (graphnet.models.components.layers.DropPath method)</a>
+      <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.DropPath.extra_repr">extra_repr() (graphnet.models.components.attention_blocks.DropPath method)</a>
 
       <ul>
         <li><a href="api/graphnet.models.model.html#graphnet.models.model.Model.extra_repr">(graphnet.models.model.Model method)</a>
@@ -934,9 +954,35 @@
 </li>
       <li><a href="api/graphnet.models.detector.nubench.html#graphnet.models.detector.nubench.FlowerXL">FlowerXL (class in graphnet.models.detector.nubench)</a>
 </li>
-      <li><a href="api/graphnet.models.coarsening.html#graphnet.models.coarsening.Coarsening.forward">forward() (graphnet.models.coarsening.Coarsening method)</a>
+      <li><a href="api/graphnet.models.cnn.cnn.html#graphnet.models.cnn.cnn.CNN.forward">forward() (graphnet.models.cnn.cnn.CNN method)</a>
 
       <ul>
+        <li><a href="api/graphnet.models.cnn.icecube_dnn.html#graphnet.models.cnn.icecube_dnn.IceCubeDNN.forward">(graphnet.models.cnn.icecube_dnn.IceCubeDNN method)</a>
+</li>
+        <li><a href="api/graphnet.models.coarsening.html#graphnet.models.coarsening.Coarsening.forward">(graphnet.models.coarsening.Coarsening method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Attention_rel.forward">(graphnet.models.components.attention_blocks.Attention_rel method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Block.forward">(graphnet.models.components.attention_blocks.Block method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Block_rel.forward">(graphnet.models.components.attention_blocks.Block_rel method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.DropPath.forward">(graphnet.models.components.attention_blocks.DropPath method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Mlp.forward">(graphnet.models.components.attention_blocks.Mlp method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.cnn_convolutions.html#graphnet.models.components.cnn_convolutions.Conv3dBN.forward">(graphnet.models.components.cnn_convolutions.Conv3dBN method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.cnn_convolutions.html#graphnet.models.components.cnn_convolutions.InceptionBlock4.forward">(graphnet.models.components.cnn_convolutions.InceptionBlock4 method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.cnn_convolutions.html#graphnet.models.components.cnn_convolutions.InceptionResnet.forward">(graphnet.models.components.cnn_convolutions.InceptionResnet method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.DynEdgeConv.forward">(graphnet.models.components.edge_convolutions.DynEdgeConv method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.DynTrans.forward">(graphnet.models.components.edge_convolutions.DynTrans method)</a>
+</li>
+        <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.EdgeConvTito.forward">(graphnet.models.components.edge_convolutions.EdgeConvTito method)</a>
+</li>
         <li><a href="api/graphnet.models.components.embedding.html#graphnet.models.components.embedding.FourierEncoder.forward">(graphnet.models.components.embedding.FourierEncoder method)</a>
 </li>
         <li><a href="api/graphnet.models.components.embedding.html#graphnet.models.components.embedding.LinearEdgeEncoder.forward">(graphnet.models.components.embedding.LinearEdgeEncoder method)</a>
@@ -953,27 +999,11 @@
 </li>
         <li><a href="api/graphnet.models.components.embedding.html#graphnet.models.components.embedding.SpacetimeEncoder.forward">(graphnet.models.components.embedding.SpacetimeEncoder method)</a>
 </li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Attention_rel.forward">(graphnet.models.components.layers.Attention_rel method)</a>
+        <li><a href="api/graphnet.models.components.grit_layers.html#graphnet.models.components.grit_layers.GritSparseMHA.forward">(graphnet.models.components.grit_layers.GritSparseMHA method)</a>
 </li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Block.forward">(graphnet.models.components.layers.Block method)</a>
+        <li><a href="api/graphnet.models.components.grit_layers.html#graphnet.models.components.grit_layers.GritTransformerLayer.forward">(graphnet.models.components.grit_layers.GritTransformerLayer method)</a>
 </li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Block_rel.forward">(graphnet.models.components.layers.Block_rel method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DropPath.forward">(graphnet.models.components.layers.DropPath method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DynEdgeConv.forward">(graphnet.models.components.layers.DynEdgeConv method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.DynTrans.forward">(graphnet.models.components.layers.DynTrans method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.EdgeConvTito.forward">(graphnet.models.components.layers.EdgeConvTito method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.GritSparseMHA.forward">(graphnet.models.components.layers.GritSparseMHA method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.GritTransformerLayer.forward">(graphnet.models.components.layers.GritTransformerLayer method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Mlp.forward">(graphnet.models.components.layers.Mlp method)</a>
-</li>
-        <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.SANGraphHead.forward">(graphnet.models.components.layers.SANGraphHead method)</a>
+        <li><a href="api/graphnet.models.components.grit_layers.html#graphnet.models.components.grit_layers.SANGraphHead.forward">(graphnet.models.components.grit_layers.SANGraphHead method)</a>
 </li>
         <li><a href="api/graphnet.models.data_representation.data_representation.html#graphnet.models.data_representation.data_representation.DataRepresentation.forward">(graphnet.models.data_representation.data_representation.DataRepresentation method)</a>
 </li>
@@ -986,6 +1016,14 @@
         <li><a href="api/graphnet.models.data_representation.graphs.graphs.html#graphnet.models.data_representation.graphs.graphs.KNNGraphRWSE.forward">(graphnet.models.data_representation.graphs.graphs.KNNGraphRWSE method)</a>
 </li>
         <li><a href="api/graphnet.models.data_representation.graphs.nodes.nodes.html#graphnet.models.data_representation.graphs.nodes.nodes.NodeDefinition.forward">(graphnet.models.data_representation.graphs.nodes.nodes.NodeDefinition method)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.image_representation.html#graphnet.models.data_representation.images.image_representation.ImageRepresentation.forward">(graphnet.models.data_representation.images.image_representation.ImageRepresentation method)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition.forward">(graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition method)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition.forward">(graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition method)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition.forward">(graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition method)</a>
 </li>
         <li><a href="api/graphnet.models.detector.detector.html#graphnet.models.detector.detector.Detector.forward">(graphnet.models.detector.detector.Detector method)</a>
 </li>
@@ -1711,8 +1749,6 @@
         <li><a href="api/graphnet.data.utilities.lmdb_utilities.html#module-graphnet.data.utilities.lmdb_utilities">module</a>
 </li>
       </ul></li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li>
     graphnet.data.utilities.parquet_to_sqlite
 
@@ -1762,6 +1798,8 @@
         <li><a href="api/graphnet.data.writers.lmdb_writer.html#module-graphnet.data.writers.lmdb_writer">module</a>
 </li>
       </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li>
     graphnet.data.writers.parquet_writer
 
@@ -1896,6 +1934,27 @@
 </li>
       </ul></li>
       <li>
+    graphnet.models.cnn
+
+      <ul>
+        <li><a href="api/graphnet.models.cnn.html#module-graphnet.models.cnn">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.cnn.cnn
+
+      <ul>
+        <li><a href="api/graphnet.models.cnn.cnn.html#module-graphnet.models.cnn.cnn">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.cnn.icecube_dnn
+
+      <ul>
+        <li><a href="api/graphnet.models.cnn.icecube_dnn.html#module-graphnet.models.cnn.icecube_dnn">module</a>
+</li>
+      </ul></li>
+      <li>
     graphnet.models.coarsening
 
       <ul>
@@ -1910,10 +1969,38 @@
 </li>
       </ul></li>
       <li>
+    graphnet.models.components.attention_blocks
+
+      <ul>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#module-graphnet.models.components.attention_blocks">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.components.cnn_convolutions
+
+      <ul>
+        <li><a href="api/graphnet.models.components.cnn_convolutions.html#module-graphnet.models.components.cnn_convolutions">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.components.edge_convolutions
+
+      <ul>
+        <li><a href="api/graphnet.models.components.edge_convolutions.html#module-graphnet.models.components.edge_convolutions">module</a>
+</li>
+      </ul></li>
+      <li>
     graphnet.models.components.embedding
 
       <ul>
         <li><a href="api/graphnet.models.components.embedding.html#module-graphnet.models.components.embedding">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.components.grit_layers
+
+      <ul>
+        <li><a href="api/graphnet.models.components.grit_layers.html#module-graphnet.models.components.grit_layers">module</a>
 </li>
       </ul></li>
       <li>
@@ -2005,6 +2092,48 @@
 
       <ul>
         <li><a href="api/graphnet.models.data_representation.graphs.utils.html#module-graphnet.models.data_representation.graphs.utils">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.data_representation.images
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.html#module-graphnet.models.data_representation.images">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.data_representation.images.image_representation
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.image_representation.html#module-graphnet.models.data_representation.images.image_representation">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.data_representation.images.images
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.images.html#module-graphnet.models.data_representation.images.images">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.data_representation.images.mappings
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.html#module-graphnet.models.data_representation.images.mappings">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.data_representation.images.mappings.cnn_mapping_tables
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.cnn_mapping_tables.html#module-graphnet.models.data_representation.images.mappings.cnn_mapping_tables">module</a>
+</li>
+      </ul></li>
+      <li>
+    graphnet.models.data_representation.images.mappings.grid_definition
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#module-graphnet.models.data_representation.images.mappings.grid_definition">module</a>
 </li>
       </ul></li>
       <li>
@@ -2416,11 +2545,13 @@
 </li>
       <li><a href="api/graphnet.data.writers.graphnet_writer.html#graphnet.data.writers.graphnet_writer.GraphNeTWriter">GraphNeTWriter (class in graphnet.data.writers.graphnet_writer)</a>
 </li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition">GridDefinition (class in graphnet.models.data_representation.images.mappings.grid_definition)</a>
+</li>
       <li><a href="api/graphnet.models.gnn.grit.html#graphnet.models.gnn.grit.GRIT">GRIT (class in graphnet.models.gnn.grit)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.GritSparseMHA">GritSparseMHA (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.grit_layers.html#graphnet.models.components.grit_layers.GritSparseMHA">GritSparseMHA (class in graphnet.models.components.grit_layers)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.GritTransformerLayer">GritTransformerLayer (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.grit_layers.html#graphnet.models.components.grit_layers.GritTransformerLayer">GritTransformerLayer (class in graphnet.models.components.grit_layers)</a>
 </li>
       <li><a href="api/graphnet.models.components.pool.html#graphnet.models.components.pool.group_by">group_by() (in module graphnet.models.components.pool)</a>
 </li>
@@ -2532,23 +2663,29 @@
 </li>
       <li><a href="api/graphnet.data.extractors.icecube.i3tumextractor.html#graphnet.data.extractors.icecube.i3tumextractor.I3TUMExtractor">I3TUMExtractor (class in graphnet.data.extractors.icecube.i3tumextractor)</a>
 </li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition">IC86GridDefinition (class in graphnet.models.data_representation.images.mappings.grid_definition)</a>
+</li>
+      <li><a href="api/graphnet.models.data_representation.images.images.html#graphnet.models.data_representation.images.images.IC86Image">IC86Image (class in graphnet.models.data_representation.images.images)</a>
+</li>
       <li><a href="api/graphnet.models.data_representation.graphs.utils.html#graphnet.models.data_representation.graphs.utils.ice_transparency">ice_transparency() (in module graphnet.models.data_representation.graphs.utils)</a>
 </li>
       <li><a href="api/graphnet.models.detector.icecube.html#graphnet.models.detector.icecube.IceCube86">IceCube86 (class in graphnet.models.detector.icecube)</a>
 </li>
-  </ul></td>
-  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.data.constants.html#graphnet.data.constants.FEATURES.ICECUBE86">ICECUBE86 (graphnet.data.constants.FEATURES attribute)</a>
 
       <ul>
         <li><a href="api/graphnet.data.constants.html#graphnet.data.constants.TRUTH.ICECUBE86">(graphnet.data.constants.TRUTH attribute)</a>
 </li>
       </ul></li>
+  </ul></td>
+  <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.models.detector.prometheus.html#graphnet.models.detector.prometheus.IceCube86Prometheus">IceCube86Prometheus (class in graphnet.models.detector.prometheus)</a>
 </li>
       <li><a href="api/graphnet.models.detector.icecube.html#graphnet.models.detector.icecube.IceCubeDeepCore">IceCubeDeepCore (class in graphnet.models.detector.icecube)</a>
 </li>
       <li><a href="api/graphnet.models.detector.prometheus.html#graphnet.models.detector.prometheus.IceCubeDeepCore8">IceCubeDeepCore8 (class in graphnet.models.detector.prometheus)</a>
+</li>
+      <li><a href="api/graphnet.models.cnn.icecube_dnn.html#graphnet.models.cnn.icecube_dnn.IceCubeDNN">IceCubeDNN (class in graphnet.models.cnn.icecube_dnn)</a>
 </li>
       <li><a href="api/graphnet.models.detector.prometheus.html#graphnet.models.detector.prometheus.IceCubeGen2">IceCubeGen2 (class in graphnet.models.detector.prometheus)</a>
 </li>
@@ -2567,6 +2704,12 @@
       <li><a href="api/graphnet.models.data_representation.graphs.utils.html#graphnet.models.data_representation.graphs.utils.identify_indices">identify_indices() (in module graphnet.models.data_representation.graphs.utils)</a>
 </li>
       <li><a href="api/graphnet.models.task.task.html#graphnet.models.task.task.IdentityTask">IdentityTask (class in graphnet.models.task.task)</a>
+</li>
+      <li><a href="api/graphnet.models.data_representation.images.image_representation.html#graphnet.models.data_representation.images.image_representation.ImageRepresentation">ImageRepresentation (class in graphnet.models.data_representation.images.image_representation)</a>
+</li>
+      <li><a href="api/graphnet.models.components.cnn_convolutions.html#graphnet.models.components.cnn_convolutions.InceptionBlock4">InceptionBlock4 (class in graphnet.models.components.cnn_convolutions)</a>
+</li>
+      <li><a href="api/graphnet.models.components.cnn_convolutions.html#graphnet.models.components.cnn_convolutions.InceptionResnet">InceptionResnet (class in graphnet.models.components.cnn_convolutions)</a>
 </li>
       <li><a href="api/graphnet.utilities.config.dataset_config.html#graphnet.utilities.config.dataset_config.DatasetConfig.index_column">index_column (graphnet.utilities.config.dataset_config.DatasetConfig attribute)</a>
 </li>
@@ -2758,6 +2901,22 @@
 </li>
       <li><a href="api/graphnet.training.utils.html#graphnet.training.utils.make_train_validation_dataloader">make_train_validation_dataloader() (in module graphnet.training.utils)</a>
 </li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition.map_pixels_by">map_pixels_by (graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition property)</a>
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition.map_pixels_by">(graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition property)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition.map_pixels_by">(graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition property)</a>
+</li>
+      </ul></li>
+      <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition.mappings">mappings() (graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition method)</a>
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition.mappings">(graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition method)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition.mappings">(graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition method)</a>
+</li>
+      </ul></li>
       <li><a href="api/graphnet.models.pretraining_maskpred.html#graphnet.models.pretraining_maskpred.mask_pred_frame">mask_pred_frame (class in graphnet.models.pretraining_maskpred)</a>
 </li>
       <li><a href="api/graphnet.data.dataconverter.html#graphnet.data.dataconverter.DataConverter.merge_files">merge_files() (graphnet.data.dataconverter.DataConverter method)</a>
@@ -2772,7 +2931,7 @@
         <li><a href="api/graphnet.data.writers.sqlite_writer.html#graphnet.data.writers.sqlite_writer.SQLiteWriter.merge_files">(graphnet.data.writers.sqlite_writer.SQLiteWriter method)</a>
 </li>
       </ul></li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.EdgeConvTito.message">message() (graphnet.models.components.layers.EdgeConvTito method)</a>
+      <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.EdgeConvTito.message">message() (graphnet.models.components.edge_convolutions.EdgeConvTito method)</a>
 </li>
       <li><a href="api/graphnet.models.components.pool.html#graphnet.models.components.pool.min_pool">min_pool() (in module graphnet.models.components.pool)</a>
 </li>
@@ -2780,7 +2939,7 @@
 </li>
       <li><a href="api/graphnet.models.data_representation.graphs.edges.minkowski.html#graphnet.models.data_representation.graphs.edges.minkowski.MinkowskiKNNEdges">MinkowskiKNNEdges (class in graphnet.models.data_representation.graphs.edges.minkowski)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.Mlp">Mlp (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.attention_blocks.html#graphnet.models.components.attention_blocks.Mlp">Mlp (class in graphnet.models.components.attention_blocks)</a>
 </li>
       <li><a href="api/graphnet.models.model.html#graphnet.models.model.Model">Model (class in graphnet.models.model)</a>
 </li>
@@ -3006,11 +3165,25 @@
 </li>
         <li><a href="api/graphnet.models.html#module-graphnet.models">graphnet.models</a>
 </li>
+        <li><a href="api/graphnet.models.cnn.html#module-graphnet.models.cnn">graphnet.models.cnn</a>
+</li>
+        <li><a href="api/graphnet.models.cnn.cnn.html#module-graphnet.models.cnn.cnn">graphnet.models.cnn.cnn</a>
+</li>
+        <li><a href="api/graphnet.models.cnn.icecube_dnn.html#module-graphnet.models.cnn.icecube_dnn">graphnet.models.cnn.icecube_dnn</a>
+</li>
         <li><a href="api/graphnet.models.coarsening.html#module-graphnet.models.coarsening">graphnet.models.coarsening</a>
 </li>
         <li><a href="api/graphnet.models.components.html#module-graphnet.models.components">graphnet.models.components</a>
 </li>
+        <li><a href="api/graphnet.models.components.attention_blocks.html#module-graphnet.models.components.attention_blocks">graphnet.models.components.attention_blocks</a>
+</li>
+        <li><a href="api/graphnet.models.components.cnn_convolutions.html#module-graphnet.models.components.cnn_convolutions">graphnet.models.components.cnn_convolutions</a>
+</li>
+        <li><a href="api/graphnet.models.components.edge_convolutions.html#module-graphnet.models.components.edge_convolutions">graphnet.models.components.edge_convolutions</a>
+</li>
         <li><a href="api/graphnet.models.components.embedding.html#module-graphnet.models.components.embedding">graphnet.models.components.embedding</a>
+</li>
+        <li><a href="api/graphnet.models.components.grit_layers.html#module-graphnet.models.components.grit_layers">graphnet.models.components.grit_layers</a>
 </li>
         <li><a href="api/graphnet.models.components.layers.html#module-graphnet.models.components.layers">graphnet.models.components.layers</a>
 </li>
@@ -3037,6 +3210,18 @@
         <li><a href="api/graphnet.models.data_representation.graphs.nodes.nodes.html#module-graphnet.models.data_representation.graphs.nodes.nodes">graphnet.models.data_representation.graphs.nodes.nodes</a>
 </li>
         <li><a href="api/graphnet.models.data_representation.graphs.utils.html#module-graphnet.models.data_representation.graphs.utils">graphnet.models.data_representation.graphs.utils</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.html#module-graphnet.models.data_representation.images">graphnet.models.data_representation.images</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.image_representation.html#module-graphnet.models.data_representation.images.image_representation">graphnet.models.data_representation.images.image_representation</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.images.html#module-graphnet.models.data_representation.images.images">graphnet.models.data_representation.images.images</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.html#module-graphnet.models.data_representation.images.mappings">graphnet.models.data_representation.images.mappings</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.cnn_mapping_tables.html#module-graphnet.models.data_representation.images.mappings.cnn_mapping_tables">graphnet.models.data_representation.images.mappings.cnn_mapping_tables</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#module-graphnet.models.data_representation.images.mappings.grid_definition">graphnet.models.data_representation.images.mappings.grid_definition</a>
 </li>
         <li><a href="api/graphnet.models.detector.html#module-graphnet.models.detector">graphnet.models.detector</a>
 </li>
@@ -3169,9 +3354,11 @@
   <td style="width: 33%; vertical-align: top;"><ul>
       <li><a href="api/graphnet.data.extractors.extractor.html#graphnet.data.extractors.extractor.Extractor.name">name (graphnet.data.extractors.extractor.Extractor property)</a>
 </li>
-      <li><a href="api/graphnet.models.gnn.gnn.html#graphnet.models.gnn.gnn.GNN.nb_inputs">nb_inputs (graphnet.models.gnn.gnn.GNN property)</a>
+      <li><a href="api/graphnet.models.cnn.cnn.html#graphnet.models.cnn.cnn.CNN.nb_inputs">nb_inputs (graphnet.models.cnn.cnn.CNN property)</a>
 
       <ul>
+        <li><a href="api/graphnet.models.gnn.gnn.html#graphnet.models.gnn.gnn.GNN.nb_inputs">(graphnet.models.gnn.gnn.GNN property)</a>
+</li>
         <li><a href="api/graphnet.models.task.classification.html#graphnet.models.task.classification.BinaryClassificationTask.nb_inputs">(graphnet.models.task.classification.BinaryClassificationTask attribute)</a>
 </li>
         <li><a href="api/graphnet.models.task.classification.html#graphnet.models.task.classification.BinaryClassificationTaskLogits.nb_inputs">(graphnet.models.task.classification.BinaryClassificationTaskLogits attribute)</a>
@@ -3221,9 +3408,11 @@
         <li><a href="api/graphnet.models.task.task.html#graphnet.models.task.task.UnsupervisedTask.nb_inputs">(graphnet.models.task.task.UnsupervisedTask method)</a>
 </li>
       </ul></li>
-      <li><a href="api/graphnet.models.data_representation.data_representation.html#graphnet.models.data_representation.data_representation.DataRepresentation.nb_outputs">nb_outputs (graphnet.models.data_representation.data_representation.DataRepresentation property)</a>
+      <li><a href="api/graphnet.models.cnn.cnn.html#graphnet.models.cnn.cnn.CNN.nb_outputs">nb_outputs (graphnet.models.cnn.cnn.CNN property)</a>
 
       <ul>
+        <li><a href="api/graphnet.models.data_representation.data_representation.html#graphnet.models.data_representation.data_representation.DataRepresentation.nb_outputs">(graphnet.models.data_representation.data_representation.DataRepresentation property)</a>
+</li>
         <li><a href="api/graphnet.models.data_representation.graphs.nodes.nodes.html#graphnet.models.data_representation.graphs.nodes.nodes.NodeDefinition.nb_outputs">(graphnet.models.data_representation.graphs.nodes.nodes.NodeDefinition property)</a>
 </li>
         <li><a href="api/graphnet.models.gnn.gnn.html#graphnet.models.gnn.gnn.GNN.nb_outputs">(graphnet.models.gnn.gnn.GNN property)</a>
@@ -3439,7 +3628,7 @@
 </li>
       <li><a href="api/graphnet.utilities.imports.html#graphnet.utilities.imports.requires_icecube">requires_icecube() (in module graphnet.utilities.imports)</a>
 </li>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.EdgeConvTito.reset_parameters">reset_parameters() (graphnet.models.components.layers.EdgeConvTito method)</a>
+      <li><a href="api/graphnet.models.components.edge_convolutions.html#graphnet.models.components.edge_convolutions.EdgeConvTito.reset_parameters">reset_parameters() (graphnet.models.components.edge_convolutions.EdgeConvTito method)</a>
 </li>
   </ul></td>
   <td style="width: 33%; vertical-align: top;"><ul>
@@ -3467,7 +3656,7 @@
 <h2 id="S">S</h2>
 <table style="width: 100%" class="indextable genindextable"><tr>
   <td style="width: 33%; vertical-align: top;"><ul>
-      <li><a href="api/graphnet.models.components.layers.html#graphnet.models.components.layers.SANGraphHead">SANGraphHead (class in graphnet.models.components.layers)</a>
+      <li><a href="api/graphnet.models.components.grit_layers.html#graphnet.models.components.grit_layers.SANGraphHead">SANGraphHead (class in graphnet.models.components.grit_layers)</a>
 </li>
       <li><a href="api/graphnet.models.model.html#graphnet.models.model.Model.save">save() (graphnet.models.model.Model method)</a>
 </li>
@@ -3563,6 +3752,16 @@
 
       <ul>
         <li><a href="api/graphnet.training.callbacks.html#graphnet.training.callbacks.GraphnetEarlyStopping.setup">(graphnet.training.callbacks.GraphnetEarlyStopping method)</a>
+</li>
+      </ul></li>
+      <li><a href="api/graphnet.models.data_representation.images.image_representation.html#graphnet.models.data_representation.images.image_representation.ImageRepresentation.shape">shape (graphnet.models.data_representation.images.image_representation.ImageRepresentation property)</a>
+
+      <ul>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition.shape">(graphnet.models.data_representation.images.mappings.grid_definition.ExamplePrometheusGridDefinition property)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition.shape">(graphnet.models.data_representation.images.mappings.grid_definition.GridDefinition property)</a>
+</li>
+        <li><a href="api/graphnet.models.data_representation.images.mappings.grid_definition.html#graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition.shape">(graphnet.models.data_representation.images.mappings.grid_definition.IC86GridDefinition property)</a>
 </li>
       </ul></li>
       <li><a href="api/graphnet.models.easy_model.html#graphnet.models.easy_model.EasySyntax.shared_step">shared_step() (graphnet.models.easy_model.EasySyntax method)</a>
