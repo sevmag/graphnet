@@ -596,7 +596,12 @@ def flash_spacetime_forward(
             valid = (idx.unsqueeze(0) < seqlens.unsqueeze(1))[:, None, :, None]
             o2v = o2 * valid
             out = out + (o2v if single_round else o2v.to(out.dtype))
-    if single_round:
+    # The output the backward reads enters it only through
+    # dl = rowsum(dO * out); on diffuse rows the true output is nearly the
+    # same vector everywhere, so any bf16 cast of it is a constant that dl
+    # would inherit. Under the switch the fp32 sum is returned and the
+    # autograd wrapper hands the model its bf16 cast while keeping this.
+    if single_round and os.environ.get("FLASH_ST_FP32_DL") != "1":
         out = out.to(qc.dtype)
     return out, lse
 
@@ -668,7 +673,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
         ctx.packed = cu_seqlens is not None
         ctx.scale = scale
         ctx.flags = (use_attn_bias, use_activation_bias)
-        return out
+        return out if out.dtype == q.dtype else out.to(q.dtype)
 
     @staticmethod
     def backward(  # type: ignore[override]
