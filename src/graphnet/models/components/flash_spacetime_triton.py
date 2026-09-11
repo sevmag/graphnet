@@ -705,7 +705,13 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
         mask = torch.zeros(valid.shape, dtype=torch.float32, device=q.device)
         mask[~valid] = float("-inf")
 
-        with torch.enable_grad():
+        # No autocast is active inside a backward, so the eager reference
+        # would mix the saved bf16 activations with fp32 parameters; running
+        # it under autocast in the saved dtype makes it compute what the
+        # eager module computes under the trainer's own autocast.
+        with torch.enable_grad(), torch.autocast(
+            q.device.type, dtype=q.dtype, enabled=q.dtype != torch.float32
+        ):
             qd = q.detach().requires_grad_(q.requires_grad)
             kd = k.detach().requires_grad_(k.requires_grad)
             vd = v.detach().requires_grad_(v.requires_grad)
