@@ -508,10 +508,12 @@ def flash_spacetime_forward(
     else:
         u = qc  # dummy pointer, never read
 
-    # On a row whose attention is diffuse the activation-bias term is close
-    # to `b`, so casting it to bf16 on its own rounds `b` to the same value
-    # on every such row and the output carries that constant; summed in
-    # fp32 first, the value term dithers the rounding away. The kernel
+    # On a row whose attention is diffuse, A' is close to the mean pair
+    # feature and the activation-bias term A'W^T + b to the same vector on
+    # every such row, so storing A' in bf16 and casting the term on its own
+    # each round a near-constant to a fixed value and the output carries the
+    # sum of those constants; kept in fp32 and rounded once with the value
+    # term, the rounding is dithered as it is in the eager path. The kernel
     # stores into whatever dtype the buffer has.
     single_round = os.environ.get("FLASH_ST_SINGLE_ROUND") == "1"
     o1 = (
@@ -519,15 +521,20 @@ def flash_spacetime_forward(
         if single_round
         else torch.zeros_like(qc)
     )
+    acc_dtype = torch.float32 if single_round else q.dtype
     if packed:
-        ae = torch.zeros_like(qc) if use_activation_bias else qc
+        ae = (
+            torch.zeros(qc.shape, device=q.device, dtype=acc_dtype)
+            if use_activation_bias
+            else qc
+        )
         lse = torch.zeros(
             qc.shape[0], heads, device=q.device, dtype=torch.float32
         )
     else:
         ae = (
             torch.zeros(
-                batch, heads, length, c, device=q.device, dtype=q.dtype
+                batch, heads, length, c, device=q.device, dtype=acc_dtype
             )
             if use_activation_bias
             else qc  # dummy pointer, never written
