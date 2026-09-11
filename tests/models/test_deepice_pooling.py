@@ -7,7 +7,6 @@ import torch
 from torch_geometric.data import Data, Batch
 
 from graphnet.models.gnn import DeepIce
-from graphnet.models.utils import array_to_sequence
 
 N_FEATURES = 6
 
@@ -62,20 +61,27 @@ def test_state_dict_is_interchangeable() -> None:
 
 
 def test_mean_pool_matches_per_event_mean() -> None:
-    """The pooled output is the mean of that event's real token rows."""
+    """The pooled output is the mean of that event's real token rows.
+
+    The token stack is taken from the last block's own output rather
+    than by re-driving the model, so the test states the pooling
+    contract without depending on how the stages are wired together.
+    """
     batch = _synth_batch()
+    lengths = [int(d.x.shape[0]) for d in batch.to_data_list()]
     model = _model(pooling="mean")
-    with torch.no_grad():
-        pooled = model(batch)
-        x0, mask, seq_length = array_to_sequence(
-            batch.x, batch.batch, padding_value=0
-        )
-        tokens = model.fourier_ext(x0, seq_length)
-        attn_mask = model._additive_mask(mask, tokens.dtype)
-        tokens = model._run_rel_blocks(tokens, x0, attn_mask)
-        tokens = model._run_blocks(tokens, attn_mask)
+    captured = []
+    handle = model.blocks[-1].register_forward_hook(
+        lambda _module, _args, output: captured.append(output)
+    )
+    try:
+        with torch.no_grad():
+            pooled = model(batch)
+    finally:
+        handle.remove()
+    tokens = captured[-1]
     expected = torch.stack(
-        [tokens[i, : int(n)].mean(0) for i, n in enumerate(seq_length)]
+        [tokens[i, :n].mean(0) for i, n in enumerate(lengths)]
     )
     assert torch.allclose(pooled, expected, atol=1e-10)
 
