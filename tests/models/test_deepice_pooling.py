@@ -72,7 +72,7 @@ def test_mean_pool_matches_per_event_mean() -> None:
         )
         tokens = model.fourier_ext(x0, seq_length)
         attn_mask = model._additive_mask(mask, tokens.dtype)
-        tokens = model._run_rel_blocks(tokens, x0, attn_mask)
+        tokens = model._run_rel_blocks(tokens, x0, attn_mask, seq_length)
         tokens = model._run_blocks(tokens, attn_mask)
     expected = torch.stack(
         [tokens[i, : int(n)].mean(0) for i, n in enumerate(seq_length)]
