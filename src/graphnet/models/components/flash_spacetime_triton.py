@@ -508,7 +508,17 @@ def flash_spacetime_forward(
     else:
         u = qc  # dummy pointer, never read
 
-    o1 = torch.zeros_like(qc)
+    # On a row whose attention is diffuse the activation-bias term is close
+    # to `b`, so casting it to bf16 on its own rounds `b` to the same value
+    # on every such row and the output carries that constant; summed in
+    # fp32 first, the value term dithers the rounding away. The kernel
+    # stores into whatever dtype the buffer has.
+    single_round = os.environ.get("FLASH_ST_SINGLE_ROUND") == "1"
+    o1 = (
+        torch.zeros(qc.shape, device=q.device, dtype=torch.float32)
+        if single_round
+        else torch.zeros_like(qc)
+    )
     if packed:
         ae = torch.zeros_like(qc) if use_activation_bias else qc
         lse = torch.zeros(
@@ -572,12 +582,15 @@ def flash_spacetime_forward(
             o2 = o2 + bias.to(torch.float32)
         if packed:
             # Every packed row is a real token; nothing to re-zero.
-            out = out + o2.to(out.dtype)
+            out = out + (o2 if single_round else o2.to(out.dtype))
         else:
             # Pad rows must stay exactly zero after the +bias broadcast.
             idx = torch.arange(length, device=q.device)
             valid = (idx.unsqueeze(0) < seqlens.unsqueeze(1))[:, None, :, None]
-            out = out + (o2 * valid).to(out.dtype)
+            o2v = o2 * valid
+            out = out + (o2v if single_round else o2v.to(out.dtype))
+    if single_round:
+        out = out.to(qc.dtype)
     return out, lse
 
 
