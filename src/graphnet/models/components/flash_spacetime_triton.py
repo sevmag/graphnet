@@ -37,6 +37,7 @@ import triton.language as tl
 from torch import Tensor
 
 from graphnet.models.components.flash_spacetime import (
+    round_to,
     SINEMB_CLIP,
     SINEMB_INPUT_SCALE,
     TIME_SCALE,
@@ -454,6 +455,7 @@ def flash_spacetime_forward(
     use_activation_bias: bool = True,
     block_m: int = 16,
     block_n: Optional[int] = None,
+    u_seed: Optional[int] = None,
     num_warps: int = 8,
     num_stages: int = 1,
     cu_seqlens: Optional[Tensor] = None,
@@ -498,11 +500,11 @@ def flash_spacetime_forward(
     freqs = sinusoidal_frequencies(c, q.device)
 
     if use_attn_bias:
-        u = (
-            ((qc.to(torch.float32) * scale_value) @ weight.to(torch.float32))
-            .to(qc.dtype)
-            .contiguous()
-        )
+        u = round_to(
+            (qc.to(torch.float32) * scale_value) @ weight.to(torch.float32),
+            qc.dtype,
+            u_seed,
+        ).contiguous()
     else:
         u = qc  # dummy pointer, never read
 
@@ -604,6 +606,12 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
     ) -> Tensor:
         if feats.requires_grad:
             raise ValueError("feats (detector data) must not require grad")
+        # One draw per call: the backward rebuilds p from this same u.
+        u_seed = (
+            int(torch.randint(0, 2**31 - 1, (1,)).item())
+            if os.environ.get("FLASH_ST_STOCHASTIC_U") == "1"
+            else None
+        )
         out, lse = flash_spacetime_forward(
             q,
             k,
@@ -616,7 +624,9 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             use_attn_bias=use_attn_bias,
             use_activation_bias=use_activation_bias,
             cu_seqlens=cu_seqlens,
+            u_seed=u_seed,
         )
+        ctx.u_seed = u_seed
         ctx.save_for_backward(
             q,
             k,
@@ -678,6 +688,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
                 use_attn_bias=use_attn_bias,
                 use_activation_bias=use_activation_bias,
                 cu_seqlens=cu_seqlens,
+                u_seed=ctx.u_seed,
             )
             # With both biases off the projection never enters the graph;
             # autograd's convention for unused parameters is None, not zeros.
