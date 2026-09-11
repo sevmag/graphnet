@@ -581,6 +581,11 @@ def flash_spacetime_forward(
     return out, lse
 
 
+# Seeds for the stochastic-rounding draws come from here rather than the
+# global RNG, so enabling the switch leaves the data sampler's order alone.
+_SEED_GEN = torch.Generator().manual_seed(0x5EED)
+
+
 class _FlashSpacetimeAttention(torch.autograd.Function):
     """Fused forward and deterministic Triton backward.
 
@@ -608,7 +613,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             raise ValueError("feats (detector data) must not require grad")
         # One draw per call: the backward rebuilds p from this same u.
         u_seed = (
-            int(torch.randint(0, 2**31 - 1, (1,)).item())
+            int(torch.randint(0, 2**31 - 1, (1,), generator=_SEED_GEN).item())
             if os.environ.get("FLASH_ST_STOCHASTIC_U") == "1"
             else None
         )

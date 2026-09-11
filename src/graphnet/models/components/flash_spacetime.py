@@ -57,6 +57,9 @@ def sinusoidal_frequencies(dim: int, device: torch.device) -> Tensor:
     )
 
 
+_SR_GENERATORS: dict = {}
+
+
 def round_to(
     x: Tensor, dtype: torch.dtype, seed: Optional[int] = None
 ) -> Tensor:
@@ -81,9 +84,15 @@ def round_to(
     xf = x.float()
     _, exp = torch.frexp(xf)
     ulp = torch.ldexp(torch.ones_like(xf), exp - 8)
-    gen = None
+    # Own generators, so the draws never advance the global RNG the data
+    # sampler permutes with -- arms that differ only in rounding must still
+    # see the same batches.
     if seed is not None:
         gen = torch.Generator(device=x.device).manual_seed(seed)
+    else:
+        gen = _SR_GENERATORS.setdefault(
+            str(x.device), torch.Generator(device=x.device).manual_seed(0x5EED)
+        )
     r = torch.rand(
         xf.shape, device=x.device, dtype=torch.float32, generator=gen
     )
