@@ -64,6 +64,7 @@ class DeepIce(GNN):
         q_tile: int = 64,
         tiled_checkpoint: bool = True,
         pooling: str = "cls",
+        fourier_mlp_dim: Optional[int] = None,
     ):
         """Construct `DeepIce`.
 
@@ -133,6 +134,14 @@ class DeepIce(GNN):
                 parameter exists either way, so a checkpoint loads under both
                 settings -- but under `"mean"` it receives no gradient, which
                 DDP rejects without `find_unused_parameters=True`.
+            fourier_mlp_dim: Hidden width of the projection that turns the
+                concatenated sinusoidal features into `hidden_dim`. Unset, it
+                is the concatenation's own width, which makes that one square
+                layer the largest tensor in the model by a wide margin --
+                over half its parameters for the reduced configuration. This
+                is pure width: unlike `seq_length` it carries no spectral
+                meaning, so narrowing it trades capacity without moving any
+                sinusoidal band.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -140,7 +149,7 @@ class DeepIce(GNN):
         if fourier_schema is None:
             self.fourier_ext: nn.Module = FourierEncoderEPJC(
                 seq_length=seq_length,
-                mlp_dim=None,
+                mlp_dim=fourier_mlp_dim,
                 output_dim=fourier_out_dim,
                 scaled=scaled_emb,
                 n_features=n_features,
@@ -169,11 +178,14 @@ class DeepIce(GNN):
             )
             # The general encoder leaves this projection to the model.
             concat_dim = self.fourier_ext.output_dim
+            mlp_dim = (
+                concat_dim if fourier_mlp_dim is None else fourier_mlp_dim
+            )
             self.fourier_mlp = nn.Sequential(
-                nn.Linear(concat_dim, concat_dim),
-                nn.LayerNorm(concat_dim),
+                nn.Linear(concat_dim, mlp_dim),
+                nn.LayerNorm(mlp_dim),
                 nn.GELU(),
-                nn.Linear(concat_dim, fourier_out_dim),
+                nn.Linear(mlp_dim, fourier_out_dim),
             )
         if rel_attention not in ("dense", "tiled"):
             raise ValueError(
