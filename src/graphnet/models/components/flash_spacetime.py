@@ -29,7 +29,6 @@ multiplied by `scale` before BOTH the content term `q k^T` and the bias term
 """
 
 import math
-import os
 from typing import Optional, Tuple
 
 import torch
@@ -55,48 +54,6 @@ def sinusoidal_frequencies(dim: int, device: torch.device) -> Tensor:
     return torch.exp(
         torch.arange(half, device=device) * (-(log_n_freq / half))
     )
-
-
-_SR_GENERATORS: dict = {}
-
-
-def round_to(
-    x: Tensor, dtype: torch.dtype, seed: Optional[int] = None
-) -> Tensor:
-    """Cast `x` to `dtype`, stochastically when `FLASH_ST_STOCHASTIC_U=1`.
-
-    The kernels round a per-query vector to bf16 on the host before
-    contracting it with every key of the row, so round-to-nearest gives each
-    row an error that is coherent across its keys and a fixed function of
-    the query. Stochastic rounding keeps the same error size and the same
-    expectation but makes the residual a fresh draw, so it isolates whether
-    that coherence matters. A `seed` makes the draw reproducible where the
-    backward must rebuild exactly what the forward used.
-    """
-    if (
-        dtype != torch.bfloat16
-        or os.environ.get("FLASH_ST_STOCHASTIC_U") != "1"
-    ):
-        return x.to(dtype)
-    # bf16 carries 8 significand bits, so values in [2^(e-1), 2^e) sit on a
-    # grid of 2^(e-8); adding U[0,1) before the floor rounds each value to a
-    # neighbour with probability equal to its distance from the other.
-    xf = x.float()
-    _, exp = torch.frexp(xf)
-    ulp = torch.ldexp(torch.ones_like(xf), exp - 8)
-    # Own generators, so the draws never advance the global RNG the data
-    # sampler permutes with -- arms that differ only in rounding must still
-    # see the same batches.
-    if seed is not None:
-        gen = torch.Generator(device=x.device).manual_seed(seed)
-    else:
-        gen = _SR_GENERATORS.setdefault(
-            str(x.device), torch.Generator(device=x.device).manual_seed(0x5EED)
-        )
-    r = torch.rand(
-        xf.shape, device=x.device, dtype=torch.float32, generator=gen
-    )
-    return (torch.floor(xf / ulp + r) * ulp).to(dtype)
 
 
 def spacetime_pair_features(
