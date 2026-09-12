@@ -288,6 +288,69 @@ class ARCA115Realistic(Detector):
         return torch.log10(torch.clamp(x, min=1.0))
 
 
+class IceCube86Realistic(Detector):
+    """`Detector` class for IceCube-86 at the DOM-readout level.
+
+    `IceCube86Prometheus` describes the photon tier, where a hit is a detected
+    photon and the only observables are the module position and an arrival
+    time. This class describes what the DAQ delivers: pulses carrying a time
+    and a charge, on DOMs that are either standard or DeepCore's
+    high-quantum-efficiency type.
+
+    Expected features: `dom_x`, `dom_y`, `dom_z`, `t`, `charge`, `hqe`. The
+    positions are named `dom_*` rather than `x`, `y`, `z` because `Data.x` is
+    reserved for the node feature matrix, and a feature called `x` is silently
+    dropped from the graph's named fields. Positions are carried per pulse
+    rather than joined from `geometry_table`, whose global 0-based sensor
+    numbering differs from the simulation's 1-based per-string one.
+
+    The position and time scales are those of `IceCube86` and are not free to
+    change: `SpacetimeEncoder` converts standardized time into standardized
+    distance with the fixed factor `3e4 / 500 * 0.3`, so the spacetime
+    interval behind DeepIce's attention bias is only physical when positions
+    are divided by 500 m and times by 3e4 ns.
+    """
+
+    geometry_table_path = os.path.join(
+        PROMETHEUS_GEOMETRY_TABLE_DIR, "icecube.parquet"
+    )
+    xyz = ["dom_x", "dom_y", "dom_z"]
+    string_id_column = "sensor_string_id"
+    sensor_id_column = "sensor_id"
+
+    def feature_map(self) -> Dict[str, Callable]:
+        """Map standardization functions to each dimension."""
+        feature_map = {
+            "dom_x": self._xy,
+            "dom_y": self._xy,
+            "dom_z": self._z,
+            "t": self._t,
+            "charge": self._charge,
+            "hqe": self._identity,
+        }
+        return feature_map
+
+    def _xy(self, x: torch.tensor) -> torch.tensor:
+        return x / 500.0
+
+    def _z(self, x: torch.tensor) -> torch.tensor:
+        # The simulation measures depth from the ice surface, whereas
+        # IceCube's own frame puts z = 0 at 1948.07 m depth, the centre of the
+        # array; the /500 scale assumes the latter.
+        return (x + 1948.07) / 500.0
+
+    def _t(self, x: torch.tensor) -> torch.tensor:
+        # Scale only: no constant can remove the per-event injection offset,
+        # so the origin is left to the data representation.
+        return x / 3.0e04
+
+    def _charge(self, x: torch.tensor) -> torch.tensor:
+        # Charge reaches 1e4 PE on the brightest DOMs, so the tail is
+        # compressed. The floor sits under the 0.23 PE discriminator, so no
+        # recorded pulse is clipped.
+        return torch.log10(torch.clamp(x, min=0.1))
+
+
 class ORCA150(Detector):
     """`Detector` class for Prometheus ORCA150."""
 
