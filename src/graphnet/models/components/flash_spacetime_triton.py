@@ -454,7 +454,6 @@ def flash_spacetime_forward(
     use_activation_bias: bool = True,
     block_m: int = 16,
     block_n: Optional[int] = None,
-    with_fp32_sum: bool = False,
     num_warps: int = 8,
     num_stages: int = 1,
     cu_seqlens: Optional[Tensor] = None,
@@ -466,9 +465,6 @@ def flash_spacetime_forward(
     `cu_seqlens` ([B+1] token offsets) the tensors are instead PACKED:
     q/k/v [T, H, D], feats [T, F], outputs [T, H, D] — no padding exists
     anywhere and lengths are unbounded (`seqlens` is ignored).
-
-    `with_fp32_sum=True` appends the fp32 sum of the two output terms as a
-    third value, for a backward that must not see the rounded output.
     """
     packed = cu_seqlens is not None
     if cu_seqlens is not None:
@@ -510,27 +506,16 @@ def flash_spacetime_forward(
     else:
         u = qc  # dummy pointer, never read
 
-    # The accumulators stay in fp32. The output the model receives is
-    # assembled below exactly as it always was -- each term rounded to the
-    # model dtype, then added -- but the backward must not read that: on a
-    # row whose attention is diffuse the output is nearly the same vector on
-    # every row, so its bf16 rounding is a constant, and dl = rowsum(dO*out)
-    # would turn it into a gradient bias with a fixed direction. The kernel
-    # stores into whatever dtype the buffer has.
-    o1 = torch.zeros(qc.shape, device=q.device, dtype=torch.float32)
+    o1 = torch.zeros_like(qc)
     if packed:
-        ae = (
-            torch.zeros(qc.shape, device=q.device, dtype=torch.float32)
-            if use_activation_bias
-            else qc
-        )
+        ae = torch.zeros_like(qc) if use_activation_bias else qc
         lse = torch.zeros(
             qc.shape[0], heads, device=q.device, dtype=torch.float32
         )
     else:
         ae = (
             torch.zeros(
-                batch, heads, length, c, device=q.device, dtype=torch.float32
+                batch, heads, length, c, device=q.device, dtype=q.dtype
             )
             if use_activation_bias
             else qc  # dummy pointer, never written
@@ -578,29 +563,19 @@ def flash_spacetime_forward(
         num_stages=num_stages,
     )
 
-    # What the model receives: the attention output and the bias term each
-    # rounded to the model dtype from the values the kernel accumulated,
-    # then added. The fp32 sum of the same two terms is what the backward
-    # reads.
-    out = o1.to(qc.dtype)
-    out32 = o1
+    out = o1
     if use_activation_bias:
-        w32 = weight.to(torch.float32)
-        o2 = ae.to(qc.dtype).to(torch.float32) @ w32.t()
-        o2_32 = ae @ w32.t()
+        o2 = ae.to(torch.float32) @ weight.to(torch.float32).t()
         if bias is not None:
             o2 = o2 + bias.to(torch.float32)
-            o2_32 = o2_32 + bias.to(torch.float32)
-        if not packed:
+        if packed:
+            # Every packed row is a real token; nothing to re-zero.
+            out = out + o2.to(out.dtype)
+        else:
             # Pad rows must stay exactly zero after the +bias broadcast.
             idx = torch.arange(length, device=q.device)
             valid = (idx.unsqueeze(0) < seqlens.unsqueeze(1))[:, None, :, None]
-            o2 = o2 * valid
-            o2_32 = o2_32 * valid
-        out = out + o2.to(out.dtype)
-        out32 = out32 + o2_32
-    if with_fp32_sum:
-        return out, lse, out32
+            out = out + (o2 * valid).to(out.dtype)
     return out, lse
 
 
@@ -629,7 +604,7 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
     ) -> Tensor:
         if feats.requires_grad:
             raise ValueError("feats (detector data) must not require grad")
-        out, lse, out32 = flash_spacetime_forward(
+        out, lse = flash_spacetime_forward(
             q,
             k,
             v,
@@ -641,9 +616,9 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             use_attn_bias=use_attn_bias,
             use_activation_bias=use_activation_bias,
             cu_seqlens=cu_seqlens,
-            with_fp32_sum=True,
         )
-        # The backward reads the fp32 sum, never the rounded output.
+        # The backward forms its own softmax row sums; the output is not
+        # needed.
         ctx.save_for_backward(
             q,
             k,
@@ -652,7 +627,6 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             weight,
             bias if bias is not None else q.new_empty(0),
             seqlens,
-            out32,
             lse,
             cu_seqlens if cu_seqlens is not None else q.new_empty(0),
         )
@@ -674,7 +648,6 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
             weight,
             bias_t,
             seqlens,
-            out,
             lse,
             cu_t,
         ) = ctx.saved_tensors
@@ -698,7 +671,6 @@ class _FlashSpacetimeAttention(torch.autograd.Function):
                 weight,
                 bias,
                 seqlens,
-                out,
                 lse,
                 grad_out,
                 scale=ctx.scale,
