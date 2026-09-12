@@ -3,20 +3,33 @@
 Deterministic two-kernel scheme (DESIGN.md §8) with the projection folded
 to the host on both sides, mirroring the forward:
 
-- host prologue: `u = (q·scale) @ W`, `w~ = dO @ W`, `dOβ = dO·β`,
-  `Dl = Σ_c dO⊙O` (all deterministic GEMMs/reductions);
-- column-owned kernel: recomputes S, P, dS tile-by-tile and writes dk, dv
-  (exclusive rows, fixed loop order — no atomics);
-- row-owned kernel: writes the dS@k part of dq plus the per-row
-  E-accumulators `H = Σ_j dS·E` and `G = Σ_j P·E` and `σ = Σ_j dS`;
+- host prologue: `u = (q·scale) @ W`, `w~ = dO @ W`, `dOβ = dO·β` (all
+  deterministic GEMMs/reductions);
+- row-owned kernel: a first pass over the keys forms the softmax row sum
+  `D_i = Σ_j P_ij dP_ij / Σ_j P_ij` from the same P and dP that the second
+  pass turns into dS; the second pass writes the dS@k part of dq plus the per-row
+  E-accumulators `H = Σ_j dS·E` and `G = Σ_j P·E` and `σ = Σ_j dS`, and
+  `D` itself for the column kernel;
+- column-owned kernel: recomputes S, P, dS tile-by-tile with that `D` and
+  writes dk, dv (exclusive rows, fixed loop order — no atomics);
 - host epilogue: `dq = scale·(dqp + [A](H @ W^T + σ⊗β))`,
   `dW = [A] Σ qt⊗H + [V] Σ dO⊗G` (two GEMMs over flattened rows),
   `dβ = [V] Σ_valid dO` (the logit path vanishes analytically).
 
 Bitwise run-to-run determinism is structural: every buffer has exactly one
 writer and every reduction is either an in-kernel fixed-order loop or a
-cuBLAS call. The rowsum identity `Dl = Σ_c dO⊙O` requires `O` to be the
-total forward output and dropout to be zero (asserted in the public op).
+cuBLAS call.
+
+`D` is formed in-kernel rather than taken from the forward output through
+the identity `D_i = dO_i·O_i`. The identity holds for the exact softmax,
+but the forward accumulates with weights rounded to the compute dtype and
+the backward recomputes P from the LSE, so a `D` read off the output is
+consistent with neither the P it multiplies nor the dP it is subtracted
+from, and `Σ_j dS_ij` does not vanish: every rounding on either side leaks
+into a per-row term of one sign, which in bf16 training walks the
+attention toward one-hot rows. Formed from the very P and dP that form dS,
+the row sum of dS is zero identically, whatever the forward stored, and
+the backward needs no saved output at all.
 """
 
 from typing import Optional, Tuple
@@ -40,7 +53,7 @@ from graphnet.models.components.flash_spacetime_triton import (
 
 
 @triton.jit
-def _recompute_p_ds(
+def _recompute_p_dpr(
     qt0: tl.tensor,
     qt1: tl.tensor,
     qt2: tl.tensor,  # [M, G, CC]
@@ -64,7 +77,6 @@ def _recompute_p_ds(
     wt2: tl.tensor,  # w~ chunks [M, G, CC]
     dob: tl.tensor,  # [M, G] dO·β
     lse: tl.tensor,  # [M, G]
-    dl: tl.tensor,  # [M, G]
     col_valid: tl.tensor,  # [N]
     C_: tl.constexpr,
     C_CHUNK: tl.constexpr,
@@ -72,7 +84,10 @@ def _recompute_p_ds(
     USE_ACT_BIAS: tl.constexpr,
     INPUT_PRECISION: tl.constexpr,
 ) -> tuple:
-    """P and dS for one (M, N) tile, in [M, G, N] layout (fp32).
+    """P and raw dP for one (M, N) tile, in [M, G, N] layout (fp32).
+
+    P is exactly zero at masked columns; dP there is whatever the masked
+    (zero) operands give and must not be read on its own.
 
     Annotated with the builtin rather than `typing.Tuple`: Triton's
     frontend parses the return annotation of a jit'd function and
@@ -134,10 +149,97 @@ def _recompute_p_ds(
         if C_ > 2 * C_CHUNK:
             wb += tl.dot(wt2, e2, input_precision=INPUT_PRECISION)
         dpr += wb + dob[:, :, None]
+    return p, dpr
 
-    ds = p * (dpr - dl[:, :, None])
-    ds = tl.where(col_valid[None, None, :], ds, 0.0)
-    return p, ds
+
+@triton.jit
+def _col_tiles(
+    k_ptr: tl.tensor,
+    v_ptr: tl.tensor,
+    freq_ptr: tl.tensor,
+    col_off: tl.tensor,  # [N, G, CC] element offsets of the key block
+    col_mask: tl.tensor,  # [N, G, 1]
+    feats_j: tl.tensor,  # [N] feature-row pointers of the key block
+    col_valid: tl.tensor,  # [N]
+    pix: tl.tensor,
+    piy: tl.tensor,
+    piz: tl.tensor,
+    pit: tl.tensor,  # [M] query positions
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    C_: tl.constexpr,
+    C_CHUNK: tl.constexpr,
+    F_: tl.constexpr,
+    USE_ATTN_BIAS: tl.constexpr,
+    USE_ACT_BIAS: tl.constexpr,
+    CDTYPE: tl.constexpr,
+    TIME_SCALE_C: tl.constexpr,
+    INPUT_SCALE: tl.constexpr,
+    CLIP: tl.constexpr,
+) -> tuple:
+    """K, v and pair-feature chunks of one key block for a row block."""
+    k0 = tl.load(k_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0).to(
+        CDTYPE
+    )
+    if C_ > C_CHUNK:
+        k1 = tl.load(
+            k_ptr + col_off + 1 * C_CHUNK, mask=col_mask, other=0.0
+        ).to(CDTYPE)
+    else:
+        k1 = k0
+    if C_ > 2 * C_CHUNK:
+        k2 = tl.load(
+            k_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
+        ).to(CDTYPE)
+    else:
+        k2 = k0
+    v0 = tl.load(v_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0).to(
+        CDTYPE
+    )
+    if C_ > C_CHUNK:
+        v1 = tl.load(
+            v_ptr + col_off + 1 * C_CHUNK, mask=col_mask, other=0.0
+        ).to(CDTYPE)
+    else:
+        v1 = v0
+    if C_ > 2 * C_CHUNK:
+        v2 = tl.load(
+            v_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
+        ).to(CDTYPE)
+    else:
+        v2 = v0
+    if USE_ATTN_BIAS or USE_ACT_BIAS:
+        pjx = tl.load(feats_j + 0, mask=col_valid, other=0.0)
+        pjy = tl.load(feats_j + 1, mask=col_valid, other=0.0)
+        pjz = tl.load(feats_j + 2, mask=col_valid, other=0.0)
+        pjt = tl.load(feats_j + 3, mask=col_valid, other=0.0)
+        x = _pair_angle(
+            pix,
+            piy,
+            piz,
+            pit,
+            pjx,
+            pjy,
+            pjz,
+            pjt,
+            TIME_SCALE_C,
+            INPUT_SCALE,
+            CLIP,
+        )
+        e0 = _e_chunk(x, freq_ptr, 0 * C_CHUNK, F_, C_CHUNK, CDTYPE)
+        if C_ > C_CHUNK:
+            e1 = _e_chunk(x, freq_ptr, 1 * C_CHUNK, F_, C_CHUNK, CDTYPE)
+        else:
+            e1 = e0
+        if C_ > 2 * C_CHUNK:
+            e2 = _e_chunk(x, freq_ptr, 2 * C_CHUNK, F_, C_CHUNK, CDTYPE)
+        else:
+            e2 = e0
+    else:
+        e0 = tl.zeros((BLOCK_M, C_CHUNK, BLOCK_N), dtype=CDTYPE)
+        e1 = e0
+        e2 = e0
+    return k0, k1, k2, v0, v1, v2, e0, e1, e2
 
 
 @triton.jit
@@ -154,7 +256,7 @@ def flash_spacetime_bwd_cols_kernel(  # noqa: C901
     feats_ptr: tl.tensor,
     seqlen_ptr: tl.tensor,
     lse_ptr: tl.tensor,
-    dl_ptr: tl.tensor,
+    d_ptr: tl.tensor,  # [B, H, L] softmax row sums from the row kernel
     dob_ptr: tl.tensor,
     dk_ptr: tl.tensor,
     dv_ptr: tl.tensor,
@@ -372,7 +474,7 @@ def flash_spacetime_bwd_cols_kernel(  # noqa: C901
                 row_vec = (b * H + offs_g[None, :]) * L + offs_m[:, None]
             row_vec_mask = row_valid[:, None] & head_live[None, :]
             lse = tl.load(lse_ptr + row_vec, mask=row_vec_mask, other=0.0)
-            dl = tl.load(dl_ptr + row_vec, mask=row_vec_mask, other=0.0)
+            d_row = tl.load(d_ptr + row_vec, mask=row_vec_mask, other=0.0)
             if USE_ACT_BIAS:
                 dob = tl.load(dob_ptr + row_vec, mask=row_vec_mask, other=0.0)
             else:
@@ -420,7 +522,7 @@ def flash_spacetime_bwd_cols_kernel(  # noqa: C901
                 e0 = tl.zeros((BLOCK_M, C_CHUNK, BLOCK_N), dtype=CDTYPE)
                 e1 = e0
                 e2 = e0
-            p, ds = _recompute_p_ds(
+            p, dpr = _recompute_p_dpr(
                 qt0,
                 qt1,
                 qt2,
@@ -444,7 +546,6 @@ def flash_spacetime_bwd_cols_kernel(  # noqa: C901
                 wt2,
                 dob,
                 lse,
-                dl,
                 col_valid,
                 C_,
                 C_CHUNK,
@@ -452,6 +553,8 @@ def flash_spacetime_bwd_cols_kernel(  # noqa: C901
                 USE_ACT_BIAS,
                 INPUT_PRECISION,
             )
+            ds = p * (dpr - d_row[:, :, None])
+            ds = tl.where(col_valid[None, None, :], ds, 0.0)
             pcd = p.to(CDTYPE)
             dscd = ds.to(CDTYPE)
 
@@ -547,7 +650,7 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
     feats_ptr: tl.tensor,
     seqlen_ptr: tl.tensor,
     lse_ptr: tl.tensor,
-    dl_ptr: tl.tensor,
+    d_ptr: tl.tensor,  # [B, H, L] softmax row sums, written here
     dob_ptr: tl.tensor,
     dqp_ptr: tl.tensor,
     hacc_ptr: tl.tensor,
@@ -574,7 +677,7 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
     INPUT_SCALE: tl.constexpr,
     CLIP: tl.constexpr,
 ) -> None:
-    """Row-owned backward: dq's dS@k part plus H, G, sigma accumulators."""
+    """Row-owned backward: D, then dq's dS@k part plus H, G, sigma."""
     pid_m = tl.program_id(0)
     b = tl.program_id(1)
     m0 = pid_m * BLOCK_M
@@ -693,7 +796,6 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
         row_vec = (b * H + offs_g[None, :]) * L + offs_m[:, None]
     row_vec_mask = row_valid[:, None] & head_live[None, :]
     lse = tl.load(lse_ptr + row_vec, mask=row_vec_mask, other=0.0)
-    dl = tl.load(dl_ptr + row_vec, mask=row_vec_mask, other=0.0)
     if USE_ACT_BIAS:
         dob = tl.load(dob_ptr + row_vec, mask=row_vec_mask, other=0.0)
     else:
@@ -707,6 +809,92 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
     piy = tl.load(feats_i + 1, mask=row_valid, other=0.0)
     piz = tl.load(feats_i + 2, mask=row_valid, other=0.0)
     pit = tl.load(feats_i + 3, mask=row_valid, other=0.0)
+
+    # First pass: the softmax row sum from the same P and dP that the second
+    # pass turns into dS, so that rowsum(dS) is zero identically. It is the
+    # P-weighted mean of dP, normalised by the recomputed weights rather
+    # than assumed to have unit mass: at large logits the fp32 LSE from the
+    # forward and the logits recomputed here differ by order one, which
+    # scales every P of a row by the same factor, and the mean is invariant
+    # to that where the bare sum is not.
+    dsum = tl.zeros((BLOCK_M, G_PAD), dtype=tl.float32)
+    psum = tl.zeros((BLOCK_M, G_PAD), dtype=tl.float32)
+    for n0 in range(0, L, BLOCK_N):
+        offs_n = n0 + tl.arange(0, BLOCK_N)
+        col_valid = offs_n < seqlen
+        if n0 < seqlen:
+            if PACKED:
+                col_off = (
+                    (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
+                ) * C_ + offs_cc[None, None, :]
+                feats_j = feats_ptr + (tok0 + offs_n) * FEAT_STRIDE
+            else:
+                col_off = (
+                    (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
+                ) * C_ + offs_cc[None, None, :]
+                feats_j = (
+                    feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
+                )
+            col_mask = col_valid[:, None, None] & head_live[None, :, None]
+            k0, k1, k2, v0, v1, v2, e0, e1, e2 = _col_tiles(
+                k_ptr,
+                v_ptr,
+                freq_ptr,
+                col_off,
+                col_mask,
+                feats_j,
+                col_valid,
+                pix,
+                piy,
+                piz,
+                pit,
+                BLOCK_M,
+                BLOCK_N,
+                C_,
+                C_CHUNK,
+                F_,
+                USE_ATTN_BIAS,
+                USE_ACT_BIAS,
+                CDTYPE,
+                TIME_SCALE_C,
+                INPUT_SCALE,
+                CLIP,
+            )
+            p, dpr = _recompute_p_dpr(
+                qt0,
+                qt1,
+                qt2,
+                u0,
+                u1,
+                u2,
+                do0,
+                do1,
+                do2,
+                k0,
+                k1,
+                k2,
+                v0,
+                v1,
+                v2,
+                e0,
+                e1,
+                e2,
+                wt0,
+                wt1,
+                wt2,
+                dob,
+                lse,
+                col_valid,
+                C_,
+                C_CHUNK,
+                USE_ATTN_BIAS,
+                USE_ACT_BIAS,
+                INPUT_PRECISION,
+            )
+            dsum += tl.sum(p * dpr, axis=2)
+            psum += tl.sum(p, axis=2)
+    d_row = tl.where(psum > 0.0, dsum / psum, 0.0)
+    tl.store(d_ptr + row_vec, d_row, mask=row_vec_mask)
 
     dqp0 = tl.zeros((BLOCK_M, G_PAD, C_CHUNK), dtype=tl.float32)
     if C_ > C_CHUNK:
@@ -735,85 +923,40 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
                 col_off = (
                     (tok0 + offs_n[:, None, None]) * H + offs_g[None, :, None]
                 ) * C_ + offs_cc[None, None, :]
+                feats_j = feats_ptr + (tok0 + offs_n) * FEAT_STRIDE
             else:
                 col_off = (
                     (b * H + offs_g[None, :, None]) * L + offs_n[:, None, None]
                 ) * C_ + offs_cc[None, None, :]
-            col_mask = col_valid[:, None, None] & head_live[None, :, None]
-            k0 = tl.load(
-                k_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0
-            ).to(CDTYPE)
-            if C_ > C_CHUNK:
-                k1 = tl.load(
-                    k_ptr + col_off + 1 * C_CHUNK, mask=col_mask, other=0.0
-                ).to(CDTYPE)
-            else:
-                k1 = k0
-            if C_ > 2 * C_CHUNK:
-                k2 = tl.load(
-                    k_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
-                ).to(CDTYPE)
-            else:
-                k2 = k0
-            v0 = tl.load(
-                v_ptr + col_off + 0 * C_CHUNK, mask=col_mask, other=0.0
-            ).to(CDTYPE)
-            if C_ > C_CHUNK:
-                v1 = tl.load(
-                    v_ptr + col_off + 1 * C_CHUNK, mask=col_mask, other=0.0
-                ).to(CDTYPE)
-            else:
-                v1 = v0
-            if C_ > 2 * C_CHUNK:
-                v2 = tl.load(
-                    v_ptr + col_off + 2 * C_CHUNK, mask=col_mask, other=0.0
-                ).to(CDTYPE)
-
-            else:
-                v2 = v0
-            if PACKED:
-                feats_j = feats_ptr + (tok0 + offs_n) * FEAT_STRIDE
-            else:
                 feats_j = (
                     feats_ptr + b * L * FEAT_STRIDE + offs_n * FEAT_STRIDE
                 )
-            pjx = tl.load(feats_j + 0, mask=col_valid, other=0.0)
-            pjy = tl.load(feats_j + 1, mask=col_valid, other=0.0)
-            pjz = tl.load(feats_j + 2, mask=col_valid, other=0.0)
-            pjt = tl.load(feats_j + 3, mask=col_valid, other=0.0)
-
-            if USE_ATTN_BIAS or USE_ACT_BIAS:
-                x = _pair_angle(
-                    pix,
-                    piy,
-                    piz,
-                    pit,
-                    pjx,
-                    pjy,
-                    pjz,
-                    pjt,
-                    TIME_SCALE_C,
-                    INPUT_SCALE,
-                    CLIP,
-                )
-                e0 = _e_chunk(x, freq_ptr, 0 * C_CHUNK, F_, C_CHUNK, CDTYPE)
-                if C_ > C_CHUNK:
-                    e1 = _e_chunk(
-                        x, freq_ptr, 1 * C_CHUNK, F_, C_CHUNK, CDTYPE
-                    )
-                else:
-                    e1 = e0
-                if C_ > 2 * C_CHUNK:
-                    e2 = _e_chunk(
-                        x, freq_ptr, 2 * C_CHUNK, F_, C_CHUNK, CDTYPE
-                    )
-                else:
-                    e2 = e0
-            else:
-                e0 = tl.zeros((BLOCK_M, C_CHUNK, BLOCK_N), dtype=CDTYPE)
-                e1 = e0
-                e2 = e0
-            p, ds = _recompute_p_ds(
+            col_mask = col_valid[:, None, None] & head_live[None, :, None]
+            k0, k1, k2, v0, v1, v2, e0, e1, e2 = _col_tiles(
+                k_ptr,
+                v_ptr,
+                freq_ptr,
+                col_off,
+                col_mask,
+                feats_j,
+                col_valid,
+                pix,
+                piy,
+                piz,
+                pit,
+                BLOCK_M,
+                BLOCK_N,
+                C_,
+                C_CHUNK,
+                F_,
+                USE_ATTN_BIAS,
+                USE_ACT_BIAS,
+                CDTYPE,
+                TIME_SCALE_C,
+                INPUT_SCALE,
+                CLIP,
+            )
+            p, dpr = _recompute_p_dpr(
                 qt0,
                 qt1,
                 qt2,
@@ -837,7 +980,6 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
                 wt2,
                 dob,
                 lse,
-                dl,
                 col_valid,
                 C_,
                 C_CHUNK,
@@ -845,6 +987,8 @@ def flash_spacetime_bwd_rows_kernel(  # noqa: C901
                 USE_ACT_BIAS,
                 INPUT_PRECISION,
             )
+            ds = p * (dpr - d_row[:, :, None])
+            ds = tl.where(col_valid[None, None, :], ds, 0.0)
             pcd = p.to(CDTYPE)
             dscd = ds.to(CDTYPE)
             dsT = tl.trans(dscd, 1, 0, 2)  # [G, M, N]
@@ -949,7 +1093,6 @@ def flash_spacetime_backward(
     weight: Tensor,
     bias: Optional[Tensor],
     seqlens: Tensor,
-    out: Tensor,
     lse: Tensor,
     grad_out: Tensor,
     scale: Optional[float] = None,
@@ -992,7 +1135,9 @@ def flash_spacetime_backward(
     freqs = sinusoidal_frequencies(dim, q.device)
     w32 = weight.to(fp)
 
-    dl = (do.to(fp) * out.to(fp)).sum(-1)  # [B, H, L]
+    # Softmax row sums, written by the row kernel and read by the column
+    # kernel; same layout as the LSE.
+    dsum = torch.zeros_like(lse)
     u = (
         ((qc.to(fp) * scale_value) @ w32).to(qc.dtype).contiguous()
         if use_attn_bias
@@ -1003,11 +1148,11 @@ def flash_spacetime_backward(
         dob = (
             do.to(fp) @ bias.to(fp)
             if bias is not None
-            else torch.zeros_like(dl)
+            else torch.zeros_like(lse)
         )
     else:
         wt = qc
-        dob = dl  # dummy pointer, never read
+        dob = lse  # dummy pointer, never read
     dob = dob.contiguous()
 
     dk = torch.zeros_like(kc, dtype=fp)
@@ -1015,7 +1160,7 @@ def flash_spacetime_backward(
     dqp = torch.zeros_like(qc, dtype=fp)
     hacc = torch.zeros_like(qc, dtype=fp) if use_attn_bias else dqp
     gacc = torch.zeros_like(qc, dtype=fp) if use_activation_bias else dqp
-    sig = torch.zeros_like(dl) if use_attn_bias else dl
+    sig = torch.zeros_like(lse) if use_attn_bias else lse
 
     seq32 = seqlens.to(torch.int32).contiguous()
     cu32 = cu if packed else seq32
@@ -1041,24 +1186,6 @@ def flash_spacetime_backward(
         num_warps=num_warps,
         num_stages=num_stages,
     )
-    flash_spacetime_bwd_cols_kernel[(triton.cdiv(length, block_n), batch)](
-        qc,
-        kc,
-        vc,
-        u,
-        do,
-        wt,
-        featsc,
-        seq32,
-        lse,
-        dl,
-        dob,
-        dk,
-        dv,
-        cu32,
-        freqs,
-        **common,
-    )
     flash_spacetime_bwd_rows_kernel[(triton.cdiv(length, block_m), batch)](
         qc,
         kc,
@@ -1069,12 +1196,30 @@ def flash_spacetime_backward(
         featsc,
         seq32,
         lse,
-        dl,
+        dsum,
         dob,
         dqp,
         hacc,
         gacc,
         sig,
+        cu32,
+        freqs,
+        **common,
+    )
+    flash_spacetime_bwd_cols_kernel[(triton.cdiv(length, block_n), batch)](
+        qc,
+        kc,
+        vc,
+        u,
+        do,
+        wt,
+        featsc,
+        seq32,
+        lse,
+        dsum,
+        dob,
+        dk,
+        dv,
         cu32,
         freqs,
         **common,
