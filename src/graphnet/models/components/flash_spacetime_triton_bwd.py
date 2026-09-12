@@ -27,7 +27,6 @@ import triton.language as tl
 from torch import Tensor
 
 from graphnet.models.components.flash_spacetime import (
-    round_to,
     SINEMB_CLIP,
     SINEMB_INPUT_SCALE,
     TIME_SCALE,
@@ -961,7 +960,6 @@ def flash_spacetime_backward(
     num_warps: int = 8,
     num_stages: int = 1,
     cu_seqlens: Optional[Tensor] = None,
-    u_seed: Optional[int] = None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Optional[Tensor]]:
     """Deterministic backward; returns (dq, dk, dv, dW, db).
 
@@ -996,14 +994,12 @@ def flash_spacetime_backward(
 
     dl = (do.to(fp) * out.to(fp)).sum(-1)  # [B, H, L]
     u = (
-        round_to(
-            (qc.to(fp) * scale_value) @ w32, qc.dtype, u_seed
-        ).contiguous()
+        ((qc.to(fp) * scale_value) @ w32).to(qc.dtype).contiguous()
         if use_attn_bias
         else qc
     )
     if use_activation_bias:
-        wt = round_to(do.to(fp) @ w32, do.dtype).contiguous()
+        wt = (do.to(fp) @ w32).to(do.dtype).contiguous()
         dob = (
             do.to(fp) @ bias.to(fp)
             if bias is not None
