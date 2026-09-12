@@ -7,6 +7,7 @@ from .prometheus import (
     ORCA150,
     ARCA115,
     ARCA115Realistic,
+    IceCube86Realistic,
 )
 from .magic import MAGIC
 from .nubench import FlowerS, FlowerL, FlowerXL, Triangle, Cluster, Hexagon
