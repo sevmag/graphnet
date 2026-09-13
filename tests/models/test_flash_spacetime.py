@@ -1,7 +1,7 @@
 """Oracle-chain tests for the fused spacetime-bias attention op.
 
 Stage (a) of the verification chain: the extracted pure-PyTorch reference in
-`graphnet.models.components.flash_spacetime` must reproduce the composed
+`flash_spacetime` must reproduce the composed
 eager modules (`SpacetimeEncoder` + `Attention_rel`) to float64 round-off,
 forward and backward. The Triton kernel is later verified against this
 reference (stage (b), GPU-only tests); together the two stages bound the
@@ -20,7 +20,7 @@ import torch
 
 from graphnet.models.components.embedding import SpacetimeEncoder
 from graphnet.models.components.layers import Attention_rel
-from graphnet.models.components.flash_spacetime import (
+from flash_spacetime import (
     SINEMB_CLIP,
     SINEMB_INPUT_SCALE,
     SINEMB_N_FREQ,

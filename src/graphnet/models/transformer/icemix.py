@@ -21,12 +21,6 @@ from graphnet.models.components.embedding import (
     SpacetimeDistance,
     SpacetimeEncoder,
 )
-from graphnet.models.components.flash_spacetime import (
-    TIME_SCALE,
-    SINEMB_INPUT_SCALE,
-    SINEMB_CLIP,
-    SINEMB_N_FREQ,
-)
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
 from graphnet.models.utils import array_to_sequence
@@ -190,6 +184,15 @@ class DeepIce(GNN):
                 f"'flash', got {rel_attention!r}"
             )
         if rel_attention == "flash":
+            # Optional dependency: only the flash path needs the package, so
+            # every other configuration must stay importable without it.
+            from flash_spacetime import (
+                SINEMB_CLIP,
+                SINEMB_INPUT_SCALE,
+                SINEMB_N_FREQ,
+                TIME_SCALE,
+            )
+
             # The kernel rebuilds the pair angle from raw coordinates with
             # the band compiled in, so a model configured for a different
             # band would train against a bias it never asked for.

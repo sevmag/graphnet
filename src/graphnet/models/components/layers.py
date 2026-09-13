@@ -496,12 +496,10 @@ class Block_rel(LightningModule):
         """
         # Heavy optional dependency (triton, GPU-only): imported on first
         # use so CPU-only environments can still import this module.
-        from graphnet.models.components.flash_spacetime import (
+        from flash_spacetime import (
             attention_rel_oracle_inputs,
-            merge_heads,
-        )
-        from graphnet.models.components.flash_spacetime_triton import (
             flash_spacetime_attention,
+            merge_heads,
         )
 
         xn = self.norm1(x)
