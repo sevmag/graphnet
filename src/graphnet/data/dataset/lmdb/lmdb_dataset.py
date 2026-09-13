@@ -8,9 +8,12 @@ from tqdm import tqdm
 from torch_geometric.data import Data
 from graphnet.data.dataset.dataset import Dataset, ColumnMissingException
 from graphnet.data.utilities.lmdb_utilities import (
+    add_data_representations_to_lmdb,
     get_all_indices,
+    get_data_representation_from_metadata,
     get_serialization_method,
 )
+from graphnet.models.data_representation import DataRepresentation
 from graphnet.training.utils import add_custom_labels, add_truth
 
 
@@ -171,7 +174,56 @@ class LMDBDataset(Dataset):
             self._remove_missing_columns()
         if self._pre_computed_representation is not None:
             self._identify_missing_truth_labels()
+            self._assert_stored_representation_matches()
         self._close_connection()
+
+    def _assert_stored_representation_matches(self) -> None:
+        """Cross-check the stored DataRepresentation against the live one.
+
+        When precomputed representations are used, mismatching feature
+        names or detector classes between the LMDB metadata and the
+        live ``data_representation`` lead to silently training on the
+        wrong inputs. Raise early instead.
+        """
+        live = self._data_representation
+        assert isinstance(self._path, str)
+        assert self._pre_computed_representation is not None
+        try:
+            stored = get_data_representation_from_metadata(
+                self._path,
+                field_name=self._pre_computed_representation,
+                trust=True,
+            )
+        except KeyError as e:
+            raise ValueError(
+                f"LMDB {self._path}: precomputed representation field "
+                f"{self._pre_computed_representation!r} not found in "
+                "metadata. Re-convert the LMDB with the matching field "
+                "name, or pass pre_computed_representation=None to read "
+                "raw tables instead."
+            ) from e
+        if stored is None:
+            return
+        live_features = list(getattr(live, "_input_feature_names", []) or [])
+        stored_features = list(
+            getattr(stored, "_input_feature_names", []) or []
+        )
+        if live_features != stored_features:
+            raise ValueError(
+                "DataRepresentation feature_names mismatch between live "
+                f"config and LMDB metadata at {self._path}.\n"
+                f"  live:   {live_features}\n"
+                f"  stored: {stored_features}\n"
+                "Re-convert the LMDB or fix the live config."
+            )
+        live_det = type(getattr(live, "_detector", None)).__name__
+        stored_det = type(getattr(stored, "_detector", None)).__name__
+        if live_det != stored_det:
+            raise ValueError(
+                "DataRepresentation detector mismatch between live config "
+                f"and LMDB metadata at {self._path}: "
+                f"live={live_det}, stored={stored_det}."
+            )
 
     def _identify_missing_truth_labels(self) -> None:
         """Identify missing truth labels in the pre-computed representation."""
@@ -434,3 +486,73 @@ class LMDBDataset(Dataset):
     def close(self) -> None:
         """Close any open LMDB connections."""
         self._close_connection()
+
+    @classmethod
+    def add_data_representations(
+        cls,
+        lmdb_path: str,
+        data_representations: Union[
+            DataRepresentation, List[DataRepresentation]
+        ],
+        pulsemap_extractor_name: str,
+        truth_extractor_name: str,
+        truth_label_names: Optional[List[str]] = None,
+        event_nos: Optional[List[int]] = None,
+        overwrite: bool = False,
+        map_size_bytes: int = 8 * 1024 * 1024 * 1024,
+        batch_size: int = 1000,
+        num_workers: int = 1,
+    ) -> Dict[str, DataRepresentation]:
+        """Retroactively add precomputed data representations to an LMDB.
+
+        Walks every event in an already-written LMDB (or only `event_nos`
+        if given), recomputes the requested `DataRepresentation`(s) from
+        the stored raw extractor tables, and writes them back under
+        `value["data_representations"][<field_name>]`. The
+        `__meta_data_representations__` metadata is updated so that
+        subsequent reads with
+        `LMDBDataset(..., pre_computed_representation=<field_name>)` and
+        `get_data_representation_from_metadata(...)` find the new entries.
+
+        Args:
+            lmdb_path: Path to an existing LMDB directory.
+            data_representations: One or more `DataRepresentation` instances
+                to compute and store.
+            pulsemap_extractor_name: Name of the extractor providing
+                per-event pulse features in the stored value.
+            truth_extractor_name: Name of the extractor providing event
+                truth in the stored value.
+            truth_label_names: Optional subset of truth columns to pass to
+                `data_rep.forward(...)`.
+            event_nos: Optional subset of event numbers to process. If None
+                (default), every event in the LMDB is processed. Useful
+                when different event subsets use different
+                `pulsemap_extractor_name` values -- call once per subset.
+            overwrite: If False (default), refuse to clobber existing
+                representations whose field name would collide. If True,
+                conflicting names are reused.
+            map_size_bytes: LMDB map size for the read-write reopen.
+            batch_size: Number of events per write transaction.
+            num_workers: Worker processes for `data_rep.forward(...)`. 1
+                (default) runs everything in the main process; with >1,
+                workers compute representations in parallel and the main
+                process serializes writes (LMDB allows one writer per env).
+
+        Returns:
+            Mapping from the field names that were written to their
+            corresponding `DataRepresentation` instances. Pass any of these
+            names as `pre_computed_representation` when constructing an
+            `LMDBDataset` to read them back.
+        """
+        return add_data_representations_to_lmdb(
+            lmdb_path=lmdb_path,
+            data_representations=data_representations,
+            pulsemap_extractor_name=pulsemap_extractor_name,
+            truth_extractor_name=truth_extractor_name,
+            truth_label_names=truth_label_names,
+            event_nos=event_nos,
+            overwrite=overwrite,
+            map_size_bytes=map_size_bytes,
+            batch_size=batch_size,
+            num_workers=num_workers,
+        )

@@ -18,9 +18,18 @@ from torch.nn.functional import (
     binary_cross_entropy_with_logits,
     softplus,
 )
+from directional_distributions import (
+    iag_nll_loss,
+    esag_nll_loss,
+    gag_nll_loss,
+    von_mises_fisher_loss,
+)
 
 from graphnet.models.model import Model
 from graphnet.utilities.decorators import final
+
+import torch.nn.functional as F
+from directional_distributions._base import _apply_reduction
 
 
 class LossFunction(Model):
@@ -675,6 +684,147 @@ class RMSEVonMisesFisher3DLoss(EnsembleLoss):
         )
 
 
+# Map a `loss_precision` string to the dtype the loss math runs in. Strings not
+# listed here (e.g. "none"/None) mean "no override" -- run in the ambient
+# autocast dtype.
+_LOSS_PRECISION_DTYPES: Dict[str, torch.dtype] = {
+    "fp32": torch.float32,
+    "float32": torch.float32,
+    "32": torch.float32,
+    "32-true": torch.float32,
+    "fp64": torch.float64,
+    "float64": torch.float64,
+    "64": torch.float64,
+    "64-true": torch.float64,
+}
+
+
+class _DirectionalDistributionLoss(LossFunction):
+    """Adapter for losses from the `directional-distributions` package.
+
+    Subclasses set `_n_params` (prediction width) and `_loss_fn` (callable
+    `(pred, y_true, reduction) -> Tensor`).
+    """
+
+    _n_params: int
+    _loss_fn: Any
+
+    def __init__(
+        self, loss_precision: Optional[str] = "fp32", **kwargs: Any
+    ) -> None:
+        """Construct the angular-distribution loss.
+
+        Args:
+            loss_precision: dtype the (numerically sensitive) loss math runs
+                in, independent of the Trainer's autocast precision. The
+                angular-Gaussian NLLs hinge on the cancellation 0.5*(S - T^2)
+                with S ~ T^2 ~ O(thousands) at high concentration; under
+                bf16/fp16 that difference keeps only ~3 significant digits and
+                NaNs the run (bf16-vs-fp32 ablation: bf16 dies at the
+                concentration ramp, fp32 survives). ``"fp32"`` (default) or
+                ``"fp64"`` run the math in that dtype with autocast disabled;
+                ``"none"`` / ``None`` leaves it in the ambient autocast dtype
+                (reproduces the bf16 instability). Guarding only this one
+                sensitive part keeps the bf16 backbone speed.
+        """
+        super().__init__(**kwargs)
+        self._loss_precision = loss_precision
+
+    def _loss_dtype(self) -> Optional[torch.dtype]:
+        """Resolve ``loss_precision`` to a dtype, or None for no override."""
+        lp = self._loss_precision
+        if lp is None:
+            return None
+        key = str(lp).lower()
+        if key in ("none", "", "keep", "auto"):
+            return None
+        if key not in _LOSS_PRECISION_DTYPES:
+            raise ValueError(
+                f"Unsupported loss_precision {lp!r}; use one of "
+                f"{sorted(_LOSS_PRECISION_DTYPES)} or 'none'."
+            )
+        return _LOSS_PRECISION_DTYPES[key]
+
+    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        target = target.reshape(-1, 3).to(prediction.dtype)
+        assert prediction.dim() == 2 and prediction.size(1) == self._n_params
+        dtype = self._loss_dtype()
+        if dtype is not None:
+            with torch.autocast(
+                device_type=prediction.device.type, enabled=False
+            ):
+                return self._eval(prediction.to(dtype), target.to(dtype))
+        return self._eval(prediction, target.to(prediction.dtype))
+
+    def _eval(self, prediction: Tensor, target: Tensor) -> Tensor:
+        # Targets typically arrive as float64 (numpy/SQL default) while the
+        # model emits float32. The package's losses use torch.einsum, which is
+        # strict about matching dtypes (unlike `*` / `torch.sum`, which
+        # silently promote and let vMF get away with mixed precision), so
+        # `_forward` casts prediction and target to a common dtype first.
+        target = target.reshape(-1, 3)
+        assert prediction.size(0) == target.size(0)
+        return type(self)._loss_fn(prediction, target, reduction="none")
+
+
+class IsotropicAngularGaussianLoss(_DirectionalDistributionLoss):
+    """Isotropic Angular Gaussian NLL on S^2.
+
+    Prediction shape [N, 3] (mean vector mu; concentration = ||mu||).
+    Target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 3
+    _loss_fn = staticmethod(iag_nll_loss)
+
+
+class EllipticallySymmetricAngularGaussianLoss(_DirectionalDistributionLoss):
+    """Elliptically Symmetric Angular Gaussian NLL on S^2.
+
+    Prediction shape [N, 5]: columns 0:3 are mu, columns 3:5 are gamma.
+    Target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 5
+    _loss_fn = staticmethod(esag_nll_loss)
+
+
+class GeneralAngularGaussianLoss(_DirectionalDistributionLoss):
+    """General Angular Gaussian NLL on S^2.
+
+    Prediction shape [N, 8]: 0:3 mu, 3:5 first two raw log-diagonal
+    entries of Cholesky L (the third is fixed by det(L) = 1), 5:8 off-
+    diagonal (L_21, L_31, L_32). Target shape [N, 3].
+    """
+
+    _n_params = 8
+    _loss_fn = staticmethod(gag_nll_loss)
+
+
+class VonMisesFisher3DLossDD(_DirectionalDistributionLoss):
+    """3D von Mises-Fisher NLL backed by `directional_distributions`.
+
+    Alternative to `VonMisesFisher3DLoss`. The two losses differ in:
+
+    * Parametrisation: this loss takes a single 3-vector mu per event;
+      direction is ``mu / ||mu||`` and ``kappa = ||mu||``. The graphnet
+      variant takes 4 numbers (direction, kappa) as independent outputs.
+    * Normalisation: this loss uses the closed-form
+      ``log C_3(kappa) = log(kappa / (2 sinh kappa))``, while the graphnet
+      variant approximates ``log C_3`` via Bessel functions (`LogCMK`) and
+      switches to an asymptotic form above kappa ~= 100.
+
+    Up to the additive constant ``log(2 pi)`` (which only affects the loss
+    value, not the gradient) the two losses are mathematically equivalent;
+    use this class to probe behaviour at large kappa.
+
+    Prediction shape [N, 3]; target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 3
+    _loss_fn = staticmethod(von_mises_fisher_loss)
+
+
 class NegCosLoss(LossFunction):
     """Negative Cosine error loss."""
 
@@ -690,3 +840,58 @@ class NegCosLoss(LossFunction):
         orig_norm = torch.nn.functional.normalize(target, dim=1)
         elements = -(reco_norm * orig_norm).sum(dim=1)
         return elements
+
+
+################ Experimental losses ########################
+
+
+def _von_mises_fisher_loss_squared_kappa(
+    n_pred: Tensor,
+    n_true: Tensor,
+    kappa_reg: float = 0.0,
+    eps: float = 1e-8,
+    reduction: str = "mean",
+) -> Tensor:
+    """Von Mises-Fisher loss with coupled direction and κ.
+
+    Expects n_pred [B,3]: direction = normalize(n_pred), κ = ||n_pred||.
+
+    Args:
+        n_pred: Predicted direction. Shape [B,3].
+        n_true: True direction. Shape [B,3].
+        kappa_reg: Regularisation term for κ.
+        eps: Small constant to avoid division by zero.
+        reduction: ``"mean"`` (default), ``"sum"``, or ``"none"``.
+    """
+    direction = F.normalize(n_pred, p=2, dim=1)
+    kappa = n_pred.norm(p=2, dim=1) ** 2
+    cos_sim = (direction * n_true).sum(dim=1)
+    log_C = -kappa + torch.log(
+        (kappa + eps) / (1 - torch.exp(-2 * kappa) + 2 * eps)
+    )
+    nll = -(kappa * cos_sim + log_C) + kappa_reg * kappa
+    return _apply_reduction(nll, reduction)
+
+
+class VonMisesFisher3DLossDDsquaredKappa(_DirectionalDistributionLoss):
+    """3D von Mises-Fisher NLL backed by `directional_distributions`.
+
+    Alternative to `VonMisesFisher3DLoss`. The two losses differ in:
+
+    * Parametrisation: this loss takes a single 3-vector mu per event;
+      direction is ``mu / ||mu||`` and ``kappa = ||mu||``. The graphnet
+      variant takes 4 numbers (direction, kappa) as independent outputs.
+    * Normalisation: this loss uses the closed-form
+      ``log C_3(kappa) = log(kappa / (2 sinh kappa))``, while the graphnet
+      variant approximates ``log C_3`` via Bessel functions (`LogCMK`) and
+      switches to an asymptotic form above kappa ~= 100.
+
+    Up to the additive constant ``log(2 pi)`` (which only affects the loss
+    value, not the gradient) the two losses are mathematically equivalent;
+    use this class to probe behaviour at large kappa.
+
+    Prediction shape [N, 3]; target shape [N, 3] unit vectors.
+    """
+
+    _n_params = 3
+    _loss_fn = staticmethod(_von_mises_fisher_loss_squared_kappa)

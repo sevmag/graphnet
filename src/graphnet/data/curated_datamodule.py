@@ -16,6 +16,7 @@ from graphnet.models.data_representation import (
     DataRepresentation,
 )
 from graphnet.data.dataset import ParquetDataset, SQLiteDataset
+from graphnet.data.dataset.lmdb.lmdb_dataset import LMDBDataset
 
 from graphnet.utilities.logging import Logger
 
@@ -53,8 +54,8 @@ class CuratedDataset(GraphNeTDataModule):
             features (Optional): List of input features from pulsemap to use.
                                 If not given, all available features will be
                                 used.
-            backend (Optional): data backend to use. Either "parquet" or
-                            "sqlite". Defaults to "parquet".
+            backend (Optional): data backend to use. One of "parquet",
+                            "sqlite", or "lmdb". Defaults to "parquet".
             train_dataloader_kwargs (Optional): Arguments for the training
                                         DataLoader. Default None.
             validation_dataloader_kwargs (Optional): Arguments for the
@@ -77,11 +78,13 @@ class CuratedDataset(GraphNeTDataModule):
 
         # Checks
         assert backend.lower() in self.available_backends
-        assert backend.lower() in ["sqlite", "parquet"]  # Double-check
+        assert backend.lower() in ["sqlite", "parquet", "lmdb"]
         if backend.lower() == "parquet":
             dataset_ref = ParquetDataset  # type: ignore
         elif backend.lower() == "sqlite":
             dataset_ref = SQLiteDataset  # type: ignore
+        elif backend.lower() == "lmdb":
+            dataset_ref = LMDBDataset  # type: ignore
 
         # Methods:
         features, truth = self._verify_args(features=features, truth=truth)
@@ -121,7 +124,7 @@ class CuratedDataset(GraphNeTDataModule):
         """Prepare arguments to DataModule.
 
         Args:
-            backend: backend of dataset. Either "parquet" or "sqlite"
+            backend: backend of dataset. One of "parquet", "sqlite", "lmdb".
             features: List of features from user to use as input.
             truth: List of event-level truth form user.
 

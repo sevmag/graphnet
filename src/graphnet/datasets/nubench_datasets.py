@@ -1,10 +1,13 @@
 """Curated datasets from the NuBench benchmark suite (arXiv:2511.13111)."""
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Type, Union
+from typing import Dict, Any, List, Optional, Tuple, Type, Union
 import os
+import time
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from graphnet.data import ERDAHostedDataset
 from graphnet.data.dataset import Dataset, EnsembleDataset
@@ -19,6 +22,53 @@ from graphnet.models.detector.nubench import (
     Triangle,
 )
 from graphnet.training.labels import Direction, Track
+
+
+def _read_file_fully(path: str) -> bytes:
+    """Read all bytes of ``path`` via raw ``os.read`` to the stat'd size.
+
+    Inside the GPU training process, higher-level reads (pandas/pyarrow, and
+    even buffered ``open().read()``) of a small selection parquet on the
+    network filesystem can return short -- yielding a truncated buffer with no
+    ``PAR1`` footer ("Parquet magic bytes not found"). This loops on raw
+    ``os.read`` until the file's fstat size is reached.
+    """
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        size = os.fstat(fd).st_size
+        chunks = []
+        got = 0
+        while got < size:
+            chunk = os.read(fd, size - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def _read_event_nos(path: str) -> List[int]:
+    """Read the ``event_no`` column from a selection parquet robustly.
+
+    Reads the whole file into memory (raw ``os.read`` to the stat size) and
+    parses from a buffer, retrying on a short read that lacks the ``PAR1``
+    footer. This guards against an occasional truncated read of a small
+    selection file on a network filesystem; a hard, persistent failure (e.g. a
+    dead Lustre OST for that file's stripe) still raises after the retries.
+    """
+    last_err = ""
+    for attempt in range(5):
+        data = _read_file_fully(path)
+        if data[-4:] == b"PAR1":
+            table = pq.read_table(pa.BufferReader(data), columns=["event_no"])
+            return table.column("event_no").to_pylist()
+        last_err = f"short read ({len(data)} bytes, no PAR1 footer)"
+        if attempt < 4:
+            time.sleep(0.5)
+    raise OSError(f"Could not fully read {path}: {last_err}")
+
 
 FEATURES_NUBENCH = [
     "sensor_pos_x",
@@ -55,6 +105,13 @@ _DEFAULT_PULSEMAPS = {
     "test": "pulses_no_noise",
 }
 
+# Train (`merged_photons`) holds raw integer photon counts and raw hit times;
+# test (`pulses_no_noise`) carries a per-pulse Gaussian smearing of 0.25 p.e.
+# on charge and 1 ns on time (arXiv:2511.13111, Eq. B.1-B.2). As a
+# `perturbation_dict` these stds smear the raw train/val hits so both splits
+# share a distribution.
+_SMEAR_PERTURBATION: Dict[str, float] = {"charge": 0.25, "t": 1.0}
+
 
 @dataclass(frozen=True)
 class NuBenchSpec:
@@ -67,6 +124,11 @@ class NuBenchSpec:
     features: List[str] = field(default_factory=lambda: list(FEATURES_NUBENCH))
     event_truth: List[str] = field(default_factory=lambda: list(TRUTH_NUBENCH))
     db_relpath: str = "merged/merged.db"
+    lmdb_relpath: str = "merged/merged.lmdb"
+    # WIP: precomputed LMDBs are not yet hosted on ERDA. Once they are,
+    # populate this with the share hash and ``prepare_data`` will fetch
+    # them automatically, mirroring the SQLite flow.
+    lmdb_erda_hash: Optional[str] = None
     selection_relpaths: Dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_SELECTIONS)
     )
@@ -182,7 +244,7 @@ class NuBenchDataset(ERDAHostedDataset):
     }
 
     _truth_table = "mc_truth"
-    _available_backends = ["sqlite"]
+    _available_backends = ["sqlite", "lmdb"]
     _creator = "NuBench Team"
     _citation = "https://arxiv.org/abs/2511.13111"
     _pulse_truth = None
@@ -192,6 +254,10 @@ class NuBenchDataset(ERDAHostedDataset):
         name: str,
         download_dir: str,
         data_representation: DataRepresentation,
+        train_selection: Optional[List[int]] = None,
+        test_selection: Optional[List[int]] = None,
+        backend: str = "sqlite",
+        pre_computed_representation: Optional[str] = "GraphDefinition",
         **kwargs: Any,
     ) -> None:
         """Construct a NuBench dataset by registry name.
@@ -203,6 +269,38 @@ class NuBenchDataset(ERDAHostedDataset):
                 dataset into.
             data_representation: Data representation whose detector
                 must match the one expected by the selected dataset.
+            train_selection: Optional list of ``event_no`` to use for
+                the train split, overriding the default selection file.
+                Must be a subset of the default train selection.
+            test_selection: Optional list of ``event_no`` to use for the
+                test split. Must be a subset of either the default train
+                selection or the default test selection; the matching
+                pulsemap and perturbation are used automatically. A subset of
+                the train selection is served raw from the train
+                (``merged_photons``) pulsemap and is smeared by
+                ``data_representation``'s ``perturbation_dict`` like train/val.
+                A subset of the test selection is served from the
+                ``pulses_no_noise`` pulsemap, whose charge and time already
+                carry NuBench's 0.25 p.e. / 1 ns smearing (arXiv:2511.13111),
+                and is never perturbed again. A selection spanning both (or
+                neither) raises ``ValueError``. The two pulsemaps are
+                different processing stages of the chain and are not directly
+                comparable.
+            backend: ``"sqlite"`` (default, ERDA-hosted) or ``"lmdb"``.
+                The on-disk layout under ``download_dir/<name>/`` is
+                parallel for both backends: SQLite expects
+                ``merged/merged.db`` while LMDB expects
+                ``merged/merged.lmdb``. Parquet selection files live at
+                ``selections/`` in either case. WIP: the LMDB backend
+                is currently produced locally by the
+                ``scripts/convert_sqlite_to_lmdb.py`` converter;
+                precomputed LMDBs will be ERDA-hosted in the future,
+                at which point ``prepare_data`` will download them
+                automatically just like SQLite.
+            pre_computed_representation: LMDB-only. Field name under
+                which the precomputed ``DataRepresentation`` was stored
+                at conversion time. Defaults to ``"GraphDefinition"``.
+                Set to ``None`` to read raw tables instead.
             **kwargs: Forwarded to :class:`ERDAHostedDataset`.
         """
         if name not in self._registry:
@@ -222,11 +320,21 @@ class NuBenchDataset(ERDAHostedDataset):
 
         self._name = name
         self._spec = spec
+        self._custom_train_selection = train_selection
+        self._custom_test_selection = test_selection
+        # None until `_prepare_args` can read the selection files to tell
+        # whether a custom test set is a train- or test-pool subset.
+        self._custom_test_pulsemap: Optional[str] = None
         self._experiment = spec.experiment
         self._comments = spec.comments
         self._features = spec.features
         self._event_truth = spec.event_truth
         self._file_hashes = {"sqlite": spec.erda_hash}
+        if spec.lmdb_erda_hash is not None:
+            # WIP: enables ERDA download for the LMDB backend once the
+            # converted databases are published.
+            self._file_hashes["lmdb"] = spec.lmdb_erda_hash
+        self._pre_computed_representation = pre_computed_representation
         # Seed with the training pulsemap; `_create_dataset` swaps it per
         # split so train/val/test can use different pulsemaps.
         self._pulsemaps = [spec.pulsemap_per_split["train"]]
@@ -234,9 +342,13 @@ class NuBenchDataset(ERDAHostedDataset):
         super().__init__(
             download_dir=download_dir,
             data_representation=data_representation,
-            backend="sqlite",
+            backend=backend,
             **kwargs,
         )
+
+        # After `super().__init__`, which initialises the logger the warning
+        # needs.
+        self._warn_if_missing_smear_perturbation()
 
     @classmethod
     def available_datasets(cls) -> List[str]:
@@ -249,9 +361,27 @@ class NuBenchDataset(ERDAHostedDataset):
         return os.path.join(self._download_dir, self._name)
 
     def prepare_data(self) -> None:
-        """Download + extract via ERDAHostedDataset if files are missing."""
+        """Ensure dataset files are present.
+
+        For ``sqlite`` (and, once published, ``lmdb`` with an ERDA
+        hash) this triggers the ERDA download/extract when files are
+        missing. For ``lmdb`` without a published hash — the current
+        WIP state — nothing is downloaded: the LMDB must be produced
+        locally by ``scripts/convert_sqlite_to_lmdb.py`` and a clear
+        error is raised if it isn't there.
+        """
         if self._files_present():
             return
+        if self._backend == "lmdb" and "lmdb" not in self._file_hashes:
+            # WIP: no ERDA hash yet for converted LMDBs. Tell the user
+            # to run the local converter instead of trying to download.
+            raise FileNotFoundError(
+                f"NuBench dataset {self._name!r} (backend='lmdb'): "
+                f"expected {self._spec.lmdb_relpath} and parquet selection "
+                f"files under {self.dataset_dir}/selections/. Precomputed "
+                "LMDBs are not yet ERDA-hosted; run "
+                "scripts/convert_sqlite_to_lmdb.py first."
+            )
         super().prepare_data()
         if not self._files_present():
             raise FileNotFoundError(
@@ -261,10 +391,11 @@ class NuBenchDataset(ERDAHostedDataset):
 
     def _files_present(self) -> bool:
         """Check that the database and selection files exist on disk."""
-        required = [
-            self._spec.db_relpath,
-            *self._spec.selection_relpaths.values(),
-        ]
+        if self._backend == "lmdb":
+            db_rel = self._spec.lmdb_relpath
+        else:
+            db_rel = self._spec.db_relpath
+        required = [db_rel, *self._spec.selection_relpaths.values()]
         return all(
             os.path.exists(os.path.join(self.dataset_dir, rel))
             for rel in required
@@ -273,17 +404,65 @@ class NuBenchDataset(ERDAHostedDataset):
     def _prepare_args(
         self, backend: str, features: List[str], truth: List[str]
     ) -> Tuple[Dict[str, Any], Union[List[int], None], Union[List[int], None]]:
-        db_path = os.path.join(self.dataset_dir, self._spec.db_relpath)
-        train_sel = pd.read_parquet(
+        if backend.lower() == "lmdb":
+            db_path = os.path.join(self.dataset_dir, self._spec.lmdb_relpath)
+        else:
+            db_path = os.path.join(self.dataset_dir, self._spec.db_relpath)
+        default_train_sel = _read_event_nos(
             os.path.join(
                 self.dataset_dir, self._spec.selection_relpaths["train"]
             )
-        )["event_no"].tolist()
-        test_sel = pd.read_parquet(
+        )
+        test_sel = _read_event_nos(
             os.path.join(
                 self.dataset_dir, self._spec.selection_relpaths["test"]
             )
-        )["event_no"].tolist()
+        )
+
+        train_sel = default_train_sel
+        if self._custom_train_selection is not None:
+            train_sel = self._apply_custom_selection(
+                self._custom_train_selection, default_train_sel, "train"
+            )
+        if self._custom_test_selection is not None:
+            # The default train and test selections are disjoint, so a custom
+            # test set's pulsemap is fixed by which one it is a subset of;
+            # belonging to neither is ambiguous and rejected.
+            custom = list(self._custom_test_selection)
+            custom_set = set(custom)
+            if custom_set.issubset(default_train_sel):
+                self._custom_test_pulsemap = self._spec.pulsemap_per_split[
+                    "train"
+                ]
+            elif custom_set.issubset(test_sel):
+                self._custom_test_pulsemap = self._spec.pulsemap_per_split[
+                    "test"
+                ]
+            else:
+                orphans = sorted(
+                    custom_set - set(default_train_sel) - set(test_sel)
+                )
+                raise ValueError(
+                    f"Custom test selection is not a subset of either the "
+                    f"train or the test selection: {len(orphans)} event_no(s) "
+                    f"in neither (e.g. {orphans[:5]})."
+                )
+            test_sel = custom
+
+        if (
+            self._custom_train_selection is not None
+            or self._custom_test_selection is not None
+        ):
+            # Unlike the default selections, custom ones can put the same
+            # event_no in both splits, so guard against a leaky train/test
+            # split.
+            overlap = set(test_sel).intersection(train_sel)
+            if overlap:
+                raise ValueError(
+                    f"Custom train and test selections overlap: "
+                    f"{len(overlap)} shared event_no(s) (e.g. "
+                    f"{sorted(overlap)[:5]}). Train and test must be disjoint."
+                )
 
         dataset_args = {
             "path": db_path,
@@ -303,14 +482,95 @@ class NuBenchDataset(ERDAHostedDataset):
                 ),
             },
         }
+        if backend.lower() == "lmdb":
+            dataset_args["pre_computed_representation"] = (
+                self._pre_computed_representation
+            )
         return dataset_args, train_sel, test_sel
+
+    @staticmethod
+    def _apply_custom_selection(
+        custom: List[int], default: List[int], split: str
+    ) -> List[int]:
+        default_set = set(default)
+        missing = [e for e in custom if e not in default_set]
+        if missing:
+            raise ValueError(
+                f"Custom {split} selection is not a subset of the default "
+                f"{split} selection: {len(missing)} event_no(s) missing "
+                f"(e.g. {missing[:5]})."
+            )
+        return list(custom)
+
+    def _warn_if_missing_smear_perturbation(self) -> None:
+        """Warn when ``data_representation`` won't emulate NuBench smearing.
+
+        The train/val ``merged_photons`` pulsemap holds raw integer photon
+        counts and raw hit times, while the test ``pulses_no_noise`` pulsemap
+        carries NuBench's per-pulse smearing (std 0.25 p.e. on charge, 1 ns on
+        time; arXiv:2511.13111). The ``perturbation_dict`` is what reproduces
+        that smearing on the raw train/val hits. Without it -- or with stds
+        differing from the NuBench values -- the train/val and test splits are
+        drawn from different distributions, so warn the user.
+        """
+        pdict = getattr(self._data_representation, "_perturbation_dict", None)
+        configured = pdict if isinstance(pdict, dict) else {}
+        missing = [f for f in _SMEAR_PERTURBATION if f not in configured]
+        if missing:
+            self.warning_once(
+                f"NuBench dataset {self._name!r}: `data_representation` has "
+                f"no perturbation for {missing}. The train/val "
+                "`merged_photons` pulsemap keeps its raw integer photon "
+                "counts and raw hit times, while the test `pulses_no_noise` "
+                "pulsemap carries NuBench's 0.25 p.e. / 1 ns smearing "
+                "(arXiv:2511.13111); the splits are therefore drawn from "
+                "different distributions. Pass "
+                f"`perturbation_dict={_SMEAR_PERTURBATION}` to the data "
+                "representation to emulate the smearing on the raw train/val "
+                "hits."
+            )
+            return
+        mismatched = {
+            f: configured[f]
+            for f, std in _SMEAR_PERTURBATION.items()
+            if configured[f] != std
+        }
+        if mismatched:
+            self.warning_once(
+                f"NuBench dataset {self._name!r}: `data_representation` "
+                f"perturbs {mismatched}, which differs from NuBench's "
+                f"smearing of {_SMEAR_PERTURBATION} (0.25 p.e. on charge, 1 "
+                "ns on time; arXiv:2511.13111). The emulated train/val "
+                "smearing will not match the test `pulses_no_noise` "
+                "distribution."
+            )
+
+    @staticmethod
+    def _without_perturbation(
+        data_representation: DataRepresentation,
+    ) -> DataRepresentation:
+        """Return a representation that never perturbs its inputs.
+
+        A representation with no ``perturbation_dict`` is returned unchanged;
+        otherwise a deep copy with perturbation disabled is returned so the
+        original (used for the train/val splits) keeps perturbing.
+        """
+        if not isinstance(
+            getattr(data_representation, "_perturbation_dict", None), dict
+        ):
+            return data_representation
+        unperturbed = deepcopy(data_representation)
+        unperturbed._perturbation_dict = None
+        return unperturbed
 
     def _create_dataset(
         self,
         selection: Union[List[int], List[List[int]], List[float]],
     ) -> Union[EnsembleDataset, Dataset]:
         """Select the correct pulsemap for this split, then delegate."""
-        pmap = self._spec.pulsemap_per_split
+        pmap = dict(self._spec.pulsemap_per_split)
+        if self._custom_test_pulsemap is not None:
+            pmap["test"] = self._custom_test_pulsemap
         if selection is self._test_selection:
             key = "test"
         elif selection is getattr(self, "_val_selection", None):
@@ -318,4 +578,20 @@ class NuBenchDataset(ERDAHostedDataset):
         else:
             key = "train"
         self._dataset_args["pulsemaps"] = [pmap[key]]
+
+        # Only the `pulses_no_noise` pulsemap is already smeared, so it alone
+        # drops the perturbation to avoid smearing twice; every raw
+        # `merged_photons` split keeps it to emulate the smearing.
+        test_is_presmeared = (
+            key == "test"
+            and pmap["test"] == self._spec.pulsemap_per_split["test"]
+        )
+        # `_data_representation` is a required NuBench argument; the base type
+        # is Optional only for the deprecated `graph_definition` path.
+        assert self._data_representation is not None
+        self._dataset_args["data_representation"] = (
+            self._without_perturbation(self._data_representation)
+            if test_is_presmeared
+            else self._data_representation
+        )
         return super()._create_dataset(selection)
