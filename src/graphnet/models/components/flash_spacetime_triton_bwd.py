@@ -30,6 +30,11 @@ into a per-row term of one sign, which in bf16 training walks the
 attention toward one-hot rows. Formed from the very P and dP that form dS,
 the row sum of dS is zero identically, whatever the forward stored, and
 the backward needs no saved output at all.
+
+The canonical home of these kernels is the standalone package
+`flash-spacetime` (https://github.com/sevmag/flash-spacetime), which
+depends only on torch and triton. The copy here predates the split;
+fixes belong upstream in that repository first.
 """
 
 from typing import Optional, Tuple

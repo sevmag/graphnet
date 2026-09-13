@@ -26,6 +26,11 @@ eager modules bit-for-bit in a common dtype, including their quirks:
 The attention logits use the q-scaled convention of `Attention_rel`: q is
 multiplied by `scale` before BOTH the content term `q k^T` and the bias term
 `sum_c q_c R_c`.
+
+The canonical home of these kernels is the standalone package
+`flash-spacetime` (https://github.com/sevmag/flash-spacetime), which
+depends only on torch and triton. The copy here predates the split;
+fixes belong upstream in that repository first.
 """
 
 import math
