@@ -26,6 +26,11 @@ in-register to `G_PAD` (next power of two >= H, min 16 for `tl.dot`).
 The backward runs the deterministic two-kernel Triton scheme in
 `flash_spacetime_triton_bwd` (set FLASH_ST_REFERENCE_BWD=1 to fall back to
 the exact autograd-through-the-reference path, which materialises `R`).
+
+The canonical home of these kernels is the standalone package
+`flash-spacetime` (https://github.com/sevmag/flash-spacetime), which
+depends only on torch and triton. The copy here predates the split;
+fixes belong upstream in that repository first.
 """
 
 import os
