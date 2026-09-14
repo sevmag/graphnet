@@ -598,6 +598,59 @@ class Block_rel(LightningModule):
             x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
 
+    def forward_flash_varlen(
+        self,
+        v: Tensor,
+        feats: Tensor,
+        cu_seqlens: Tensor,
+        spacetime: "LightningModule",
+        use_bias: bool = True,
+    ) -> Tensor:
+        """`forward_flash` on packed sequences, with no padding anywhere.
+
+        `v` is the `[total_pulses, D]` value buffer of a jagged batch and
+        `cu_seqlens` marks the event boundaries. Nothing is padded to a
+        batch maximum, so a single long event costs its own length rather
+        than every other event's, and event length is unbounded.
+
+        Normalisation, the MLP and the residual adds are per-token and run
+        on the buffer directly; only attention consults the boundaries.
+        """
+        # Heavy optional dependency (triton, GPU-only): imported on first
+        # use so CPU-only environments can still import this module.
+        from flash_spacetime import flash_spacetime_attention_varlen
+
+        xn = self.norm1(v)
+        attn = self.attn
+        q = linear(xn, attn.proj_q.weight, attn.q_bias)
+        k = linear(xn, attn.proj_k.weight, None)
+        val = linear(xn, attn.proj_v.weight, attn.v_bias)
+        # `[T, H*D]` to `[T, H, D]`: the packed analogue of the head split,
+        # which assumes a batch axis this layout does not have.
+        q, k, val = (
+            t.reshape(t.shape[0], attn.num_heads, -1) for t in (q, k, val)
+        )
+        out = flash_spacetime_attention_varlen(
+            q,
+            k,
+            val,
+            feats,
+            spacetime.projection.weight,
+            spacetime.projection.bias,
+            cu_seqlens,
+            scale=attn.scale,
+            use_attn_bias=use_bias and attn.use_attn_bias,
+            use_activation_bias=use_bias and attn.use_activation_bias,
+        )
+        out = attn.proj_drop(attn.proj(out.reshape(out.shape[0], -1)))
+        if self.gamma_1 is None:
+            v = v + self.drop_path(out)
+            v = v + self.drop_path(self.mlp(self.norm2(v)))
+        else:
+            v = v + self.drop_path(self.gamma_1 * out)
+            v = v + self.drop_path(self.gamma_2 * self.mlp(self.norm2(v)))
+        return v
+
 
 class Block(LightningModule):
     """Transformer block."""

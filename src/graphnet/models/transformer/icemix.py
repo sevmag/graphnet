@@ -64,6 +64,7 @@ class DeepIce(GNN):
         q_tile: int = 64,
         tiled_checkpoint: bool = True,
         pooling: str = "cls",
+        unpadded: bool = False,
     ):
         """Construct `DeepIce`.
 
@@ -136,6 +137,12 @@ class DeepIce(GNN):
                 parameter exists either way, so a checkpoint loads under both
                 settings -- but under `"mean"` it receives no gradient, which
                 DDP rejects without `find_unused_parameters=True`.
+            unpadded: Run the whole model on packed sequences, so nothing is
+                padded to the batch maximum and event length is unbounded --
+                `max_pulses` can be dropped rather than raised. Requires the
+                fused relative attention, the only path that takes sequence
+                boundaries instead of a mask, and mean pooling, the only
+                readout defined without a prepended token.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -255,6 +262,14 @@ class DeepIce(GNN):
                 for i in range(depth)
             ]
         )
+        if unpadded and (rel_attention != "flash" or pooling != "mean"):
+            raise ValueError(
+                "unpadded needs rel_attention='flash' and pooling='mean'; "
+                f"got {rel_attention!r} and {pooling!r}"
+            )
+        if unpadded and include_dynedge:
+            raise ValueError("unpadded cannot pad a DynEdge feature block")
+        self.unpadded = unpadded
         if pooling not in ("cls", "mean"):
             raise ValueError(
                 f"pooling must be 'cls' or 'mean', got {pooling!r}"
@@ -434,8 +449,31 @@ class DeepIce(GNN):
         total.index_add_(0, batch_idx, values.float())
         return (total / seq_length.unsqueeze(-1)).to(values.dtype)
 
+    def _forward_unpadded(self, data: Data) -> Tensor:
+        """Forward on packed sequences, padding nothing at any stage."""
+        cu = data.ptr
+        seq_length = cu.diff()
+        x0 = data.x
+        v = self.fourier_ext(
+            torch.nested.nested_tensor_from_jagged(x0, cu), seq_length
+        ).values()
+        if self.fourier_mlp is not None:
+            v = self.fourier_mlp(v)
+        for i, blk in enumerate(self.sandwich):
+            v = blk.forward_flash_varlen(
+                v, x0, cu, self.rel_pos, use_bias=i < self.n_rel
+            )
+        x = self._blocks_fn(
+            torch.nested.nested_tensor_from_jagged(
+                v, cu, min_seqlen=1, max_seqlen=int(seq_length.max())
+            )
+        )
+        return self._mean_pool(x.values(), data.batch, seq_length)
+
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
+        if self.unpadded:
+            return self._forward_unpadded(data)
         x0, mask, seq_length = array_to_sequence(
             data.x, data.batch, padding_value=0
         )
