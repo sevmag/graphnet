@@ -43,6 +43,7 @@ class DeepIce(GNN):
         include_dynedge: bool = False,
         dynedge_args: Optional[Dict[str, Any]] = None,
         n_features: int = 6,
+        rel_attention: str = "dense",
     ):
         """Construct `DeepIce`.
 
@@ -62,8 +63,19 @@ class DeepIce(GNN):
                 Competition settings. If `include_dynedge` is False, this
                 argument have no impact.
             n_features: The number of features in the input data.
+            rel_attention: How the relative blocks apply the spacetime
+                bias. `"dense"` materialises the `[B, L, L, C]` pair
+                tensor; `"flash"` routes them through a fused kernel
+                that rebuilds the pair features in-tile, so that tensor
+                never exists. The two are the same function.
         """
         super().__init__(seq_length, hidden_dim)
+        if rel_attention not in ("dense", "flash"):
+            raise ValueError(
+                f"rel_attention must be 'dense' or 'flash', "
+                f"got {rel_attention!r}"
+            )
+        self.rel_attention = rel_attention
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
         self.fourier_ext = FourierEncoder(
             seq_length=seq_length,
@@ -129,7 +141,6 @@ class DeepIce(GNN):
             data.x, data.batch, padding_value=0
         )
         x = self.fourier_ext(x0, seq_length)
-        rel_pos_bias = self.rel_pos(x0)
         batch_size = mask.shape[0]
         if self.include_dynedge:
             graph = self.dyn_edge(data)
@@ -139,10 +150,20 @@ class DeepIce(GNN):
         attn_mask = torch.zeros(mask.shape, device=mask.device)
         attn_mask[~mask] = -torch.inf
 
-        for i, blk in enumerate(self.sandwich):
-            x = blk(x, attn_mask, rel_pos_bias)
-            if i + 1 == self.n_rel:
-                rel_pos_bias = None
+        if self.rel_attention == "flash":
+            # The kernel rebuilds the pair features per tile, so it takes the
+            # raw coordinates and unpadded lengths rather than a materialised
+            # bias and a padding mask.
+            for i, blk in enumerate(self.sandwich):
+                x = blk.forward_flash(
+                    x, x0, seq_length, self.rel_pos, use_bias=i < self.n_rel
+                )
+        else:
+            rel_pos_bias = self.rel_pos(x0)
+            for i, blk in enumerate(self.sandwich):
+                x = blk(x, attn_mask, rel_pos_bias)
+                if i + 1 == self.n_rel:
+                    rel_pos_bias = None
 
         mask = torch.cat(
             [
