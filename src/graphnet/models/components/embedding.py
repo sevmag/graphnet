@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.functional import Tensor
 
-from typing import Optional
+from typing import Optional, Tuple
 
 from pytorch_lightning import LightningModule
 from torch_geometric.utils import add_self_loops
@@ -66,14 +66,17 @@ class SinusoidalPosEmb(LightningModule):
     def __init__(
         self,
         dim: int = 16,
-        n_freq: int = 10000,
+        n_freq: float = 10000.0,
         scaled: bool = False,
     ):
         """Construct `SinusoidalPosEmb`.
 
         Args:
             dim: Embedding dimension.
-            n_freq: Number of frequencies.
+            n_freq: Span of the frequency ladder. The frequencies run
+                from 1 down to `n_freq ** -((dim/2 - 1)/(dim/2))`, so
+                this sets how far the embedding reaches beyond its
+                finest scale, not how many frequencies there are.
             scaled: Whether or not to scale the output.
         """
         super().__init__()
@@ -180,18 +183,50 @@ class FourierEncoder(LightningModule):
         return x
 
 
-class SpacetimeEncoder(LightningModule):
-    """Spacetime encoder module."""
+def signed_four_distance(
+    x: Tensor,
+    time_scale: float,
+    columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+) -> Tensor:
+    """Signed spacetime four-distance between every pair of steps.
+
+    `sign(s) * sqrt(|s|)` of the interval `dx^2 - (c dt)^2`. Positive is
+    spacelike.
+
+    `time_scale` converts the time column into the same length unit as the
+    position columns, i.e. `t_scale * c / pos_scale` for whatever
+    normalisation produced the features. It is a property of that
+    normalisation rather than of the physics, so a value carried over from
+    other data silently reduces the interval to a spatial distance.
+    """
+    xi, yi, zi, ti = columns
+    pos = x[:, :, [xi, yi, zi]]
+    time = x[:, :, ti]
+    interval = (pos[:, :, None] - pos[:, None, :]).pow(2).sum(-1) - (
+        (time[:, :, None] - time[:, None, :]) * time_scale
+    ).pow(2)
+    return torch.sign(interval) * torch.sqrt(torch.abs(interval))
+
+
+class SpacetimeEncoderEPJC(LightningModule):
+    """Spacetime encoder of the IceMix Kaggle solution.
+
+    The graphnet implementation as presented in the EPJ-C publication
+    (arXiv:2310.15674). It computes the spacetime interval between each pair
+    of pulses and embeds it sinusoidally.
+
+    It carries assumptions from that competition: position must be
+    columns 0-2 and time column 3, and the constant
+    converting time into a length, the multiplier before the sinusoidal
+    ladder and the clip are all fixed to the Kaggle dataset's normalisation.
+    See `SpacetimeEncoder` for a version without them.
+    """
 
     def __init__(
         self,
         seq_length: int = 32,
     ):
-        """Construct `SpacetimeEncoder`.
-
-        This module calculates space-time interval between each pair of events
-        and generates sinusoidal positional embeddings to be added to input
-        sequences.
+        """Construct `SpacetimeEncoderEPJC`.
 
         Args:
             seq_length: Dimensionality of the sinusoidal positional embeddings.
@@ -203,20 +238,219 @@ class SpacetimeEncoder(LightningModule):
     def forward(
         self,
         x: Tensor,
-        # Lmax: Optional[int] = None,
     ) -> Tensor:
         """Forward pass."""
-        pos = x[:, :, :3]
-        time = x[:, :, 3]
-        spacetime_interval = (pos[:, :, None] - pos[:, None, :]).pow(2).sum(
-            -1
-        ) - ((time[:, :, None] - time[:, None, :]) * (3e4 / 500 * 3e-1)).pow(2)
-        four_distance = torch.sign(spacetime_interval) * torch.sqrt(
-            torch.abs(spacetime_interval)
-        )
+        four_distance = signed_four_distance(x, 3e4 / 500 * 3e-1)
         sin_emb = self.sin_emb(1024 * four_distance.clip(-4, 4))
         rel_attn = self.projection(sin_emb)
         return rel_attn
+
+
+class SpacetimeEncoder(LightningModule):
+    """Embed the spacetime interval between every pair of steps.
+
+    A refactor of `SpacetimeEncoderEPJC` that drops the assumptions tying it
+    to the Kaggle dataset, so the same encoder can be reused on other data:
+    which columns carry the coordinates, how time converts into a length, and
+    which band of separations the embedding resolves are all stated by the
+    caller rather than fixed.
+    """
+
+    def __init__(
+        self,
+        seq_length: int = 32,
+        output_dim: Optional[int] = None,
+        columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+        time_scale: float = 1.0,
+        scale: float = 1024.0,
+        clip: Optional[float] = 4.0,
+        n_freq: float = 10000.0,
+    ):
+        """Construct `SpacetimeEncoder`.
+
+        Args:
+            seq_length: Dimensionality of the sinusoidal embedding.
+            output_dim: Width of the projected per-pair feature. Defaults to
+                `seq_length`.
+            columns: Input columns holding `(x, y, z, t)`, so the encoder
+                reads the right ones whatever order the data arrives in.
+            time_scale: Factor converting the time column into the position
+                columns' length unit, `t_scale * c / pos_scale` for the
+                normalisation in use. The default assumes time already is a
+                length, as it is when the interval needs no constant.
+            scale: Multiplier applied before the sinusoidal ladder. With
+                `n_freq` it sets the resolved band: wavelengths from
+                `2 * pi / scale` up to that times
+                `n_freq ** ((seq_length/2 - 1)/(seq_length/2))`, in the unit
+                the interval is measured in.
+            clip: Bound on the four-distance before embedding, or None to
+                leave it unbounded. The tail is heavy, so without a bound a
+                few far-separated pairs dominate.
+            n_freq: Span of the frequency ladder.
+        """
+        super().__init__()
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        self.projection = nn.Linear(seq_length, output_dim or seq_length)
+        self.columns = columns
+        self.time_scale = time_scale
+        self.scale = scale
+        self.clip = clip
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Forward pass."""
+        four_distance = signed_four_distance(x, self.time_scale, self.columns)
+        if self.clip is not None:
+            four_distance = four_distance.clip(-self.clip, self.clip)
+        return self.projection(self.sin_emb(self.scale * four_distance))
+
+
+class DirectionalSpacetimeEncoder(LightningModule):
+    """Embed the separation between every pair of steps, direction included.
+
+    `SpacetimeEncoder` reduces each pair to the interval `dx^2 - (c dt)^2`.
+    That fixes how space and time combine, forgets which step came first, and
+    cannot express effects of distance or direction alone, such as
+    attenuation, the delay scattered light accumulates, or an anisotropic
+    medium. This encoder embeds the range, the signed time difference, the
+    interval and the unit direction separately and lets an MLP combine them.
+    The interval stays in as a prior on which pairs can be causally
+    connected.
+
+    Each medium has a learnable speed of light, applied to the time
+    difference before it is embedded. With more than one medium, each also
+    has a learnable code that modulates the embedded features before the MLP
+    (FiLM). Both start neutral, so every medium begins with the same map and
+    departs from it only as far as the data asks.
+    """
+
+    # Keeps the square roots and the unit direction finite for pairs with no
+    # separation, such as two pulses on the same sensor.
+    _EPS = 1e-12
+
+    def __init__(
+        self,
+        seq_length: int = 32,
+        output_dim: Optional[int] = None,
+        columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+        time_scale: float = 1.0,
+        scale: float = 1024.0,
+        clip: Optional[float] = 4.0,
+        n_freq: float = 10000.0,
+        n_direction_freq: int = 2,
+        hidden_dim: int = 32,
+        n_media: int = 1,
+        medium_dim: int = 16,
+    ):
+        """Construct `DirectionalSpacetimeEncoder`.
+
+        Args:
+            seq_length: Width of the sinusoidal embedding of each of the
+                range, the time difference and the interval.
+            output_dim: Width of the per-pair output. Defaults to
+                `seq_length`.
+            columns: Input columns holding `(x, y, z, t)`.
+            time_scale: Factor converting the time column into the position
+                columns' length unit, `t_scale * c / pos_scale` for the
+                normalisation in use. Each medium learns a multiplier on it.
+            scale: Multiplier applied before the sinusoidal ladders, as in
+                `SpacetimeEncoder`.
+            clip: Bound on the range, the time difference and the interval
+                before embedding, or None to leave them unbounded.
+            n_freq: Span of the frequency ladders.
+            n_direction_freq: Frequencies per component of the unit
+                direction. How a medium depends on direction is smooth, so a
+                few low frequencies suffice.
+            hidden_dim: Width of the MLP combining the embeddings.
+            n_media: Number of media the input can come from.
+            medium_dim: Width of the learnable code of each medium. Unused
+                with a single medium, where a constant modulation adds
+                nothing the MLP cannot absorb.
+        """
+        super().__init__()
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        self.columns = columns
+        self.time_scale = time_scale
+        self.scale = scale
+        self.clip = clip
+        self.n_direction_freq = n_direction_freq
+        in_dim = 3 * seq_length + 6 * n_direction_freq
+
+        self.log_speed = nn.Embedding(n_media, 1)
+        nn.init.zeros_(self.log_speed.weight)
+
+        self.medium_code: Optional[nn.Embedding] = None
+        self.film: Optional[nn.Linear] = None
+        if n_media > 1:
+            self.medium_code = nn.Embedding(n_media, medium_dim)
+            film = nn.Linear(medium_dim, 2 * in_dim)
+            nn.init.zeros_(film.weight)
+            nn.init.zeros_(film.bias)
+            self.film = film
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim or seq_length),
+        )
+
+    def forward(self, x: Tensor, medium: Optional[Tensor] = None) -> Tensor:
+        """Forward pass.
+
+        Args:
+            x: Padded steps, shape `[batch, length, features]`.
+            medium: Index of each event's medium, shape `[batch]`. Every
+                event is medium 0 if not given.
+
+        Returns:
+            Per-pair features, shape `[batch, length, length, output_dim]`.
+        """
+        if medium is None:
+            medium = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        xi, yi, zi, ti = self.columns
+        pos = x[:, :, [xi, yi, zi]]
+        time = x[:, :, ti]
+
+        speed = self.time_scale * torch.exp(self.log_speed(medium))
+        separation = pos[:, :, None] - pos[:, None, :]
+        range_sq = separation.pow(2).sum(-1)
+        distance = torch.sqrt(range_sq.clamp_min(self._EPS))
+        direction = separation / distance.unsqueeze(-1)
+        dt = speed.view(-1, 1, 1) * (time[:, :, None] - time[:, None, :])
+        interval = range_sq - dt.pow(2)
+        four_distance = torch.sign(interval) * torch.sqrt(
+            interval.abs().clamp_min(self._EPS)
+        )
+        if self.clip is not None:
+            distance = distance.clamp_max(self.clip)
+            dt = dt.clamp(-self.clip, self.clip)
+            four_distance = four_distance.clamp(-self.clip, self.clip)
+
+        # The lowest frequency spans half a period over [-1, 1], so opposite
+        # directions stay distinct.
+        direction_freq = (
+            0.5
+            * torch.pi
+            * torch.arange(
+                1, self.n_direction_freq + 1, device=x.device, dtype=x.dtype
+            )
+        )
+        angles = direction.unsqueeze(-1) * direction_freq
+        features = torch.cat(
+            [
+                self.sin_emb(self.scale * distance),
+                self.sin_emb(self.scale * dt),
+                self.sin_emb(self.scale * four_distance),
+                torch.sin(angles).flatten(-2),
+                torch.cos(angles).flatten(-2),
+            ],
+            dim=-1,
+        )
+        if self.film is not None and self.medium_code is not None:
+            gamma, beta = self.film(self.medium_code(medium)).chunk(2, dim=-1)
+            features = (
+                features * (1 + gamma[:, None, None]) + beta[:, None, None]
+            )
+        return self.mlp(features)
 
 
 class RRWPLinearNodeEncoder(LightningModule):
