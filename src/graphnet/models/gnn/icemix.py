@@ -8,13 +8,14 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 
 import torch
 import torch.nn as nn
-from typing import Set, Dict, Any, Optional
+from typing import Set, Dict, Any, Optional, Union
 
 from graphnet.models.components.attention_blocks import (
     Block_rel,
     Block,
 )
 from graphnet.models.components.embedding import (
+    DirectionalSpacetimeEncoder,
     FourierEncoderEPJC,
     SpacetimeEncoderEPJC,
 )
@@ -43,6 +44,9 @@ class DeepIce(GNN):
         include_dynedge: bool = False,
         dynedge_args: Optional[Dict[str, Any]] = None,
         n_features: int = 6,
+        rel_pos_encoder: str = "epjc",
+        rel_pos_kwargs: Optional[Dict[str, Any]] = None,
+        medium_key: Optional[str] = None,
     ):
         """Construct `DeepIce`.
 
@@ -63,6 +67,16 @@ class DeepIce(GNN):
                 Competition settings. If `include_dynedge` is False, this
                 argument have no impact.
             n_features: The number of features in the input data.
+            rel_pos_encoder: The pairwise encoder feeding the relative
+                attention blocks. "epjc" embeds the spacetime interval of
+                each pair, as in the EPJ-C publication. "directional" embeds
+                range, time difference, interval and direction separately;
+                see `DirectionalSpacetimeEncoder`.
+            rel_pos_kwargs: Arguments for the directional encoder, on top of
+                defaults that match the EPJ-C normalisation.
+            medium_key: Graph attribute holding each event's medium index,
+                for a directional encoder built with `n_media > 1`. Without
+                it every event is treated as medium 0.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -73,7 +87,28 @@ class DeepIce(GNN):
             scaled=scaled_emb,
             n_features=n_features,
         )
-        self.rel_pos = SpacetimeEncoderEPJC(head_size)
+        self.rel_pos: Union[SpacetimeEncoderEPJC, DirectionalSpacetimeEncoder]
+        if rel_pos_encoder == "epjc":
+            if rel_pos_kwargs or medium_key is not None:
+                raise ValueError(
+                    "rel_pos_kwargs and medium_key apply only to the "
+                    "directional encoder"
+                )
+            self.rel_pos = SpacetimeEncoderEPJC(head_size)
+        elif rel_pos_encoder == "directional":
+            self.rel_pos = DirectionalSpacetimeEncoder(
+                **{
+                    "seq_length": head_size,
+                    "time_scale": 3e4 / 500 * 3e-1,
+                    **(rel_pos_kwargs or {}),
+                }
+            )
+        else:
+            raise ValueError(
+                f"Unknown rel_pos_encoder {rel_pos_encoder!r}; expected "
+                "'epjc' or 'directional'"
+            )
+        self.medium_key = medium_key
         self.sandwich = nn.ModuleList(
             [
                 Block_rel(
@@ -130,7 +165,15 @@ class DeepIce(GNN):
             data.x, data.batch, padding_value=0
         )
         x = self.fourier_ext(x0, seq_length)
-        rel_pos_bias = self.rel_pos(x0)
+        if isinstance(self.rel_pos, DirectionalSpacetimeEncoder):
+            medium = (
+                data[self.medium_key].reshape(-1).long()
+                if self.medium_key is not None
+                else None
+            )
+            rel_pos_bias = self.rel_pos(x0, medium)
+        else:
+            rel_pos_bias = self.rel_pos(x0)
         batch_size = mask.shape[0]
         if self.include_dynedge:
             graph = self.dyn_edge(data)
