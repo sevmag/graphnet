@@ -375,9 +375,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 before embedding, or None to leave them unbounded.
             n_freq: Span of the frequency ladders.
             n_direction_freq: Frequencies per component of the unit
-                direction and of the sensors' direction difference. How a
-                medium depends on direction is smooth, so a few low
-                frequencies suffice.
+                direction. How a medium depends on direction is smooth, so a
+                few low frequencies suffice. Unused with `"cartesian"`.
             hidden_dim: Width of the MLP combining the embeddings.
             n_media: Number of media the input can come from.
             medium_dim: Width of the learnable code of each medium. Unused
@@ -389,7 +388,7 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 pointing direction as a unit vector, or None to leave the
                 sensors' orientation out. Each component of half the
                 difference of the two directions is embedded with the
-                direction frequencies.
+                ladder.
         """
         if pair_features not in ("polar", "cartesian"):
             raise ValueError(
@@ -410,7 +409,7 @@ class DirectionalSpacetimeEncoder(LightningModule):
         else:
             in_dim = 6 * seq_length
         if direction_columns is not None:
-            in_dim += 6 * n_direction_freq
+            in_dim += 3 * seq_length
 
         self.log_speed = nn.Embedding(n_media, 1)
         nn.init.zeros_(self.log_speed.weight)
@@ -470,23 +469,23 @@ class DirectionalSpacetimeEncoder(LightningModule):
             self.sin_emb(self.scale * dt),
             self.sin_emb(self.scale * four_distance),
         ]
-        # The lowest frequency spans half a period over [-1, 1], so
-        # opposite directions stay distinct.
-        direction_freq = (
-            0.5
-            * torch.pi
-            * torch.arange(
-                1,
-                self.n_direction_freq + 1,
-                device=x.device,
-                dtype=x.dtype,
-            )
-        )
         if self.pair_features == "cartesian":
             ladders += [
                 self.sin_emb(self.scale * separation[..., k]) for k in range(3)
             ]
         else:
+            # The lowest frequency spans half a period over [-1, 1], so
+            # opposite directions stay distinct.
+            direction_freq = (
+                0.5
+                * torch.pi
+                * torch.arange(
+                    1,
+                    self.n_direction_freq + 1,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+            )
             angles = direction.unsqueeze(-1) * direction_freq
             ladders += [
                 torch.sin(angles).flatten(-2),
@@ -494,15 +493,13 @@ class DirectionalSpacetimeEncoder(LightningModule):
             ]
         if self.direction_columns is not None:
             pointing = x[:, :, list(self.direction_columns)]
-            # Halved into [-1, 1], where the direction frequencies keep
-            # opposite differences distinct.
+            # Halved into [-1, 1], the range of a direction component.
             half_difference = 0.5 * (
                 pointing[:, :, None] - pointing[:, None, :]
             )
-            angles = half_difference.unsqueeze(-1) * direction_freq
             ladders += [
-                torch.sin(angles).flatten(-2),
-                torch.cos(angles).flatten(-2),
+                self.sin_emb(self.scale * half_difference[..., k])
+                for k in range(3)
             ]
         features = torch.cat(ladders, dim=-1)
         if self.film is not None and self.medium_code is not None:
