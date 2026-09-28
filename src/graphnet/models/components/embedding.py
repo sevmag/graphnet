@@ -476,12 +476,12 @@ class DirectionalSpacetimeEncoder(LightningModule):
     the vertical one along a string.
 
     Given the columns of each step's sensor pointing direction, the encoder
-    also embeds how the two sensors' directions relate: their cosine, and the
-    components of their difference, which say in which direction the two
-    orientations differ and, like the separation, change sign with the order
-    of the pair. Steps on one multi-sensor module share a position, so
-    without these such a pair differs only in time, however the two sensors
-    face.
+    also embeds the components of the difference of the two sensors'
+    directions. They say how far and in which direction the two orientations
+    differ (their length fixes the cosine) and, like the separation, change
+    sign with the order of the pair. Steps on one multi-sensor module share a
+    position, so without them such a pair differs only in time, however the
+    two sensors face.
 
     Each medium has a learnable speed of light, applied to the time
     difference before it is embedded. With more than one medium, each also
@@ -527,8 +527,9 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 before embedding, or None to leave them unbounded.
             n_freq: Span of the frequency ladders.
             n_direction_freq: Frequencies per component of the unit
-                direction, and for the sensors' cosine. How a medium depends
-                on direction is smooth, so a few low frequencies suffice.
+                direction and of the sensors' direction difference. How a
+                medium depends on direction is smooth, so a few low
+                frequencies suffice.
             hidden_dim: Width of the MLP combining the embeddings.
             n_media: Number of media the input can come from.
             medium_dim: Width of the learnable code of each medium. Unused
@@ -538,9 +539,9 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 or `"cartesian"`; see the class docstring.
             direction_columns: Input columns holding each step's sensor
                 pointing direction as a unit vector, or None to leave the
-                sensors' orientation out. The cosine between the two
-                directions and each component of half their difference are
-                embedded with the direction frequencies.
+                sensors' orientation out. Each component of half the
+                difference of the two directions is embedded with the
+                direction frequencies.
         """
         if pair_features not in ("polar", "cartesian"):
             raise ValueError(
@@ -561,7 +562,7 @@ class DirectionalSpacetimeEncoder(LightningModule):
         else:
             in_dim = 6 * seq_length
         if direction_columns is not None:
-            in_dim += 8 * n_direction_freq
+            in_dim += 6 * n_direction_freq
 
         self.log_speed = nn.Embedding(n_media, 1)
         nn.init.zeros_(self.log_speed.weight)
@@ -645,18 +646,12 @@ class DirectionalSpacetimeEncoder(LightningModule):
             ]
         if self.direction_columns is not None:
             pointing = x[:, :, list(self.direction_columns)]
-            cosine = torch.einsum("bik,bjk->bij", pointing, pointing)
             # Halved into [-1, 1], where the direction frequencies keep
             # opposite differences distinct.
             half_difference = 0.5 * (
                 pointing[:, :, None] - pointing[:, None, :]
             )
-            angles = (
-                torch.cat(
-                    [cosine.unsqueeze(-1), half_difference], dim=-1
-                ).unsqueeze(-1)
-                * direction_freq
-            )
+            angles = half_difference.unsqueeze(-1) * direction_freq
             ladders += [
                 torch.sin(angles).flatten(-2),
                 torch.cos(angles).flatten(-2),
