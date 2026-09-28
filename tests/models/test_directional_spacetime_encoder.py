@@ -127,3 +127,51 @@ def test_columns(pair_features: str) -> None:
     reordered.load_state_dict(encoder.state_dict())
     x = _steps()
     assert torch.allclose(encoder(x), reordered(x[:, :, [3, 0, 1, 2]]))
+
+
+def _pointing_steps() -> torch.Tensor:
+    """Two sensors at one position and time, facing up and sideways."""
+    x = torch.zeros(1, 2, 7)
+    x[0, 0, 6] = 1.0
+    x[0, 1, 4] = 1.0
+    return x
+
+
+@PAIR_FEATURES
+def test_sensor_directions_widen_the_input(pair_features: str) -> None:
+    """The sensors' cosine adds one sin and one cos per direction frequency."""
+    plain = DirectionalSpacetimeEncoder(
+        seq_length=8, pair_features=pair_features
+    )
+    pointing = DirectionalSpacetimeEncoder(
+        seq_length=8,
+        pair_features=pair_features,
+        direction_columns=(4, 5, 6),
+    )
+    widened = pointing.mlp[0].in_features - plain.mlp[0].in_features
+    assert widened == 2 * pointing.n_direction_freq
+
+
+@PAIR_FEATURES
+def test_distinguishes_sensor_orientation(pair_features: str) -> None:
+    """A coincident pair differs by how its two sensors face each other."""
+    encoder = DirectionalSpacetimeEncoder(
+        seq_length=8,
+        pair_features=pair_features,
+        direction_columns=(4, 5, 6),
+    )
+    crossed = _pointing_steps()
+    aligned = crossed.clone()
+    aligned[0, 1, 4:7] = aligned[0, 0, 4:7]
+    assert not torch.allclose(
+        encoder(crossed)[0, 0, 1], encoder(aligned)[0, 0, 1]
+    )
+
+
+def test_sensor_orientation_ignored_by_default() -> None:
+    """Without direction columns the extra columns do not reach the output."""
+    encoder = DirectionalSpacetimeEncoder(seq_length=8)
+    crossed = _pointing_steps()
+    aligned = crossed.clone()
+    aligned[0, 1, 4:7] = aligned[0, 0, 4:7]
+    assert torch.allclose(encoder(crossed), encoder(aligned))
