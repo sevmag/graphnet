@@ -476,9 +476,12 @@ class DirectionalSpacetimeEncoder(LightningModule):
     the vertical one along a string.
 
     Given the columns of each step's sensor pointing direction, the encoder
-    also embeds the cosine between the two sensors' directions. Steps on one
-    multi-sensor module share a position, so without it such a pair differs
-    only in time, however the two sensors face.
+    also embeds how the two sensors' directions relate: their cosine, and the
+    components of their difference, which say in which direction the two
+    orientations differ and, like the separation, change sign with the order
+    of the pair. Steps on one multi-sensor module share a position, so
+    without these such a pair differs only in time, however the two sensors
+    face.
 
     Each medium has a learnable speed of light, applied to the time
     difference before it is embedded. With more than one medium, each also
@@ -536,7 +539,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
             direction_columns: Input columns holding each step's sensor
                 pointing direction as a unit vector, or None to leave the
                 sensors' orientation out. The cosine between the two
-                directions is embedded with the direction frequencies.
+                directions and each component of half their difference are
+                embedded with the direction frequencies.
         """
         if pair_features not in ("polar", "cartesian"):
             raise ValueError(
@@ -557,7 +561,7 @@ class DirectionalSpacetimeEncoder(LightningModule):
         else:
             in_dim = 6 * seq_length
         if direction_columns is not None:
-            in_dim += 2 * n_direction_freq
+            in_dim += 8 * n_direction_freq
 
         self.log_speed = nn.Embedding(n_media, 1)
         nn.init.zeros_(self.log_speed.weight)
@@ -642,8 +646,21 @@ class DirectionalSpacetimeEncoder(LightningModule):
         if self.direction_columns is not None:
             pointing = x[:, :, list(self.direction_columns)]
             cosine = torch.einsum("bik,bjk->bij", pointing, pointing)
-            angles = cosine.unsqueeze(-1) * direction_freq
-            ladders += [torch.sin(angles), torch.cos(angles)]
+            # Halved into [-1, 1], where the direction frequencies keep
+            # opposite differences distinct.
+            half_difference = 0.5 * (
+                pointing[:, :, None] - pointing[:, None, :]
+            )
+            angles = (
+                torch.cat(
+                    [cosine.unsqueeze(-1), half_difference], dim=-1
+                ).unsqueeze(-1)
+                * direction_freq
+            )
+            ladders += [
+                torch.sin(angles).flatten(-2),
+                torch.cos(angles).flatten(-2),
+            ]
         features = torch.cat(ladders, dim=-1)
         if self.film is not None and self.medium_code is not None:
             gamma, beta = self.film(self.medium_code(medium)).chunk(2, dim=-1)
