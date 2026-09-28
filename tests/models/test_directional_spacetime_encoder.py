@@ -139,7 +139,7 @@ def _pointing_steps() -> torch.Tensor:
 
 @PAIR_FEATURES
 def test_sensor_directions_widen_the_input(pair_features: str) -> None:
-    """Three difference components, each as sin and cos."""
+    """Three difference components, each on the ladder."""
     plain = DirectionalSpacetimeEncoder(
         seq_length=8, pair_features=pair_features
     )
@@ -149,7 +149,7 @@ def test_sensor_directions_widen_the_input(pair_features: str) -> None:
         direction_columns=(4, 5, 6),
     )
     widened = pointing.mlp[0].in_features - plain.mlp[0].in_features
-    assert widened == 6 * pointing.n_direction_freq
+    assert widened == 3 * 8
 
 
 @PAIR_FEATURES
