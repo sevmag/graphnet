@@ -139,7 +139,7 @@ def _pointing_steps() -> torch.Tensor:
 
 @PAIR_FEATURES
 def test_sensor_directions_widen_the_input(pair_features: str) -> None:
-    """The cosine and three difference components, each as sin and cos."""
+    """Three difference components, each as sin and cos."""
     plain = DirectionalSpacetimeEncoder(
         seq_length=8, pair_features=pair_features
     )
@@ -149,7 +149,7 @@ def test_sensor_directions_widen_the_input(pair_features: str) -> None:
         direction_columns=(4, 5, 6),
     )
     widened = pointing.mlp[0].in_features - plain.mlp[0].in_features
-    assert widened == 8 * pointing.n_direction_freq
+    assert widened == 6 * pointing.n_direction_freq
 
 
 @PAIR_FEATURES
@@ -178,7 +178,7 @@ def test_sensor_orientation_ignored_by_default() -> None:
 
 
 def test_distinguishes_orientation_order() -> None:
-    """Swapping the two sensors flips their difference, not their cosine."""
+    """Swapping the two sensors flips the sign of their difference."""
     encoder = DirectionalSpacetimeEncoder(
         seq_length=8, direction_columns=(4, 5, 6)
     )
