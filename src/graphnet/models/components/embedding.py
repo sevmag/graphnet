@@ -323,6 +323,11 @@ class DirectionalSpacetimeEncoder(LightningModule):
     which hands the MLP separations along the detector axes directly, such as
     the vertical one along a string.
 
+    Given the columns of each step's sensor pointing direction, the encoder
+    also embeds the cosine between the two sensors' directions. Steps on one
+    multi-sensor module share a position, so without it such a pair differs
+    only in time, however the two sensors face.
+
     Each medium has a learnable speed of light, applied to the time
     difference before it is embedded. With more than one medium, each also
     has a learnable code that modulates the embedded features before the MLP
@@ -348,6 +353,7 @@ class DirectionalSpacetimeEncoder(LightningModule):
         n_media: int = 1,
         medium_dim: int = 16,
         pair_features: str = "polar",
+        direction_columns: Optional[Tuple[int, int, int]] = None,
     ):
         """Construct `DirectionalSpacetimeEncoder`.
 
@@ -366,8 +372,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 before embedding, or None to leave them unbounded.
             n_freq: Span of the frequency ladders.
             n_direction_freq: Frequencies per component of the unit
-                direction. How a medium depends on direction is smooth, so a
-                few low frequencies suffice. Unused with `"cartesian"`.
+                direction, and for the sensors' cosine. How a medium depends
+                on direction is smooth, so a few low frequencies suffice.
             hidden_dim: Width of the MLP combining the embeddings.
             n_media: Number of media the input can come from.
             medium_dim: Width of the learnable code of each medium. Unused
@@ -375,6 +381,10 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 nothing the MLP cannot absorb.
             pair_features: How the separation vector is embedded, `"polar"`
                 or `"cartesian"`; see the class docstring.
+            direction_columns: Input columns holding each step's sensor
+                pointing direction as a unit vector, or None to leave the
+                sensors' orientation out. The cosine between the two
+                directions is embedded with the direction frequencies.
         """
         if pair_features not in ("polar", "cartesian"):
             raise ValueError(
@@ -389,10 +399,13 @@ class DirectionalSpacetimeEncoder(LightningModule):
         self.clip = clip
         self.n_direction_freq = n_direction_freq
         self.pair_features = pair_features
+        self.direction_columns = direction_columns
         if pair_features == "polar":
             in_dim = 3 * seq_length + 6 * n_direction_freq
         else:
             in_dim = 6 * seq_length
+        if direction_columns is not None:
+            in_dim += 2 * n_direction_freq
 
         self.log_speed = nn.Embedding(n_media, 1)
         nn.init.zeros_(self.log_speed.weight)
@@ -452,33 +465,34 @@ class DirectionalSpacetimeEncoder(LightningModule):
             self.sin_emb(self.scale * dt),
             self.sin_emb(self.scale * four_distance),
         ]
+        # The lowest frequency spans half a period over [-1, 1], so
+        # opposite directions stay distinct.
+        direction_freq = (
+            0.5
+            * torch.pi
+            * torch.arange(
+                1,
+                self.n_direction_freq + 1,
+                device=x.device,
+                dtype=x.dtype,
+            )
+        )
         if self.pair_features == "cartesian":
             ladders += [
                 self.sin_emb(self.scale * separation[..., k]) for k in range(3)
             ]
-            features = torch.cat(ladders, dim=-1)
         else:
-            # The lowest frequency spans half a period over [-1, 1], so
-            # opposite directions stay distinct.
-            direction_freq = (
-                0.5
-                * torch.pi
-                * torch.arange(
-                    1,
-                    self.n_direction_freq + 1,
-                    device=x.device,
-                    dtype=x.dtype,
-                )
-            )
             angles = direction.unsqueeze(-1) * direction_freq
-            features = torch.cat(
-                ladders
-                + [
-                    torch.sin(angles).flatten(-2),
-                    torch.cos(angles).flatten(-2),
-                ],
-                dim=-1,
-            )
+            ladders += [
+                torch.sin(angles).flatten(-2),
+                torch.cos(angles).flatten(-2),
+            ]
+        if self.direction_columns is not None:
+            pointing = x[:, :, list(self.direction_columns)]
+            cosine = torch.einsum("bik,bjk->bij", pointing, pointing)
+            angles = cosine.unsqueeze(-1) * direction_freq
+            ladders += [torch.sin(angles), torch.cos(angles)]
+        features = torch.cat(ladders, dim=-1)
         if self.film is not None and self.medium_code is not None:
             gamma, beta = self.film(self.medium_code(medium)).chunk(2, dim=-1)
             features = (
