@@ -581,14 +581,14 @@ def add_data_representations_to_lmdb(  # noqa: C901
         )
 
     existing_metadata = _get_data_representation_metadata_dict(lmdb_path) or {}
-    existing_field_names = list(existing_metadata.keys())
 
-    if overwrite:
-        field_name_to_rep = assign_data_representation_field_names(new_reps)
-    else:
-        field_name_to_rep = assign_data_representation_field_names(
-            new_reps, existing_field_names=existing_field_names
-        )
+    # Names are assigned as a fresh write would assign them, so a
+    # representation already stored under that name is a collision the
+    # caller must resolve with overwrite=True; seeding the assignment with
+    # the existing names would instead file the repeat under the next free
+    # suffix and the metadata would silently hold two copies.
+    field_name_to_rep = assign_data_representation_field_names(new_reps)
+    if not overwrite:
         collisions = [
             name for name in field_name_to_rep if name in existing_metadata
         ]
@@ -598,6 +598,13 @@ def add_data_representations_to_lmdb(  # noqa: C901
                 f"metadata. Pass overwrite=True to replace them."
             )
 
+    # py-lmdb allows one handle per environment per process, so the index
+    # scan must finish before the write handle below is opened.
+    indices = (
+        list(event_nos)
+        if event_nos is not None
+        else get_all_indices(lmdb_path)
+    )
     env = lmdb.open(
         lmdb_path,
         map_size=map_size_bytes,
@@ -607,11 +614,6 @@ def add_data_representations_to_lmdb(  # noqa: C901
         max_dbs=1,
     )
     try:
-        indices = (
-            list(event_nos)
-            if event_nos is not None
-            else get_all_indices(lmdb_path)
-        )
         _process_events(
             env=env,
             indices=indices,
