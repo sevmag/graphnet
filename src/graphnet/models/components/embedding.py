@@ -339,6 +339,8 @@ def signed_four_distance(
     x: Tensor,
     time_scale: float,
     columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+    start: int = 0,
+    end: Optional[int] = None,
 ) -> Tensor:
     """Signed spacetime four-distance between every pair of steps.
 
@@ -350,12 +352,18 @@ def signed_four_distance(
     normalisation produced the features. It is a property of that
     normalisation rather than of the physics, so a value carried over from
     other data silently reduces the interval to a spatial distance.
+
+    `start` and `end` restrict the query axis to one band of rows, giving
+    `[B, end - start, L]` instead of `[B, L, L]`. A caller that consumes the
+    result a band at a time therefore never holds the whole pair matrix; the
+    default covers every row.
     """
     xi, yi, zi, ti = columns
     pos = x[:, :, [xi, yi, zi]]
     time = x[:, :, ti]
-    interval = (pos[:, :, None] - pos[:, None, :]).pow(2).sum(-1) - (
-        (time[:, :, None] - time[:, None, :]) * time_scale
+    rows = slice(start, end)
+    interval = (pos[:, rows, None, :] - pos[:, None, :, :]).pow(2).sum(-1) - (
+        (time[:, rows, None] - time[:, None, :]) * time_scale
     ).pow(2)
     return torch.sign(interval) * torch.sqrt(torch.abs(interval))
 
@@ -392,7 +400,22 @@ class SpacetimeEncoderEPJC(LightningModule):
         x: Tensor,
     ) -> Tensor:
         """Forward pass."""
-        four_distance = signed_four_distance(x, 3e4 / 500 * 3e-1)
+        return self.forward_tiled(x)
+
+    def forward_tiled(
+        self,
+        x: Tensor,
+        start: int = 0,
+        end: Optional[int] = None,
+    ) -> Tensor:
+        """Embed the pairs of one band of query rows.
+
+        Returns `[B, end - start, L, seq_length]`; the default band is every
+        row, which is what `forward` asks for.
+        """
+        four_distance = signed_four_distance(
+            x, 3e4 / 500 * 3e-1, start=start, end=end
+        )
         sin_emb = self.sin_emb(1024 * four_distance.clip(-4, 4))
         rel_attn = self.projection(sin_emb)
         return rel_attn
@@ -450,7 +473,22 @@ class SpacetimeEncoder(LightningModule):
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward pass."""
-        four_distance = signed_four_distance(x, self.time_scale, self.columns)
+        return self.forward_tiled(x)
+
+    def forward_tiled(
+        self,
+        x: Tensor,
+        start: int = 0,
+        end: Optional[int] = None,
+    ) -> Tensor:
+        """Embed the pairs of one band of query rows.
+
+        Returns `[B, end - start, L, output_dim]`; the default band is every
+        row, which is what `forward` asks for.
+        """
+        four_distance = signed_four_distance(
+            x, self.time_scale, self.columns, start, end
+        )
         if self.clip is not None:
             four_distance = four_distance.clip(-self.clip, self.clip)
         return self.projection(self.sin_emb(self.scale * four_distance))
