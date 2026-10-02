@@ -1,7 +1,7 @@
 """Curated datasets from the NuBench benchmark suite (arXiv:2511.13111)."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Tuple, Type, Union
+from typing import Dict, Any, List, Optional, Tuple, Type, Union
 import os
 
 import pandas as pd
@@ -67,6 +67,11 @@ class NuBenchSpec:
     features: List[str] = field(default_factory=lambda: list(FEATURES_NUBENCH))
     event_truth: List[str] = field(default_factory=lambda: list(TRUTH_NUBENCH))
     db_relpath: str = "merged/merged.db"
+    lmdb_relpath: str = "merged/merged.lmdb"
+    # WIP: precomputed LMDBs are not yet hosted on ERDA. Once they are,
+    # populate this with the share hash and ``prepare_data`` will fetch
+    # them automatically, mirroring the SQLite flow.
+    lmdb_erda_hash: Optional[str] = None
     selection_relpaths: Dict[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_SELECTIONS)
     )
@@ -182,7 +187,7 @@ class NuBenchDataset(ERDAHostedDataset):
     }
 
     _truth_table = "mc_truth"
-    _available_backends = ["sqlite"]
+    _available_backends = ["sqlite", "lmdb"]
     _creator = "NuBench Team"
     _citation = "https://arxiv.org/abs/2511.13111"
     _pulse_truth = None
@@ -192,6 +197,10 @@ class NuBenchDataset(ERDAHostedDataset):
         name: str,
         download_dir: str,
         data_representation: DataRepresentation,
+        train_selection: Optional[List[int]] = None,
+        test_selection: Optional[List[int]] = None,
+        backend: str = "sqlite",
+        pre_computed_representation: Optional[str] = "GraphDefinition",
         **kwargs: Any,
     ) -> None:
         """Construct a NuBench dataset by registry name.
@@ -203,6 +212,27 @@ class NuBenchDataset(ERDAHostedDataset):
                 dataset into.
             data_representation: Data representation whose detector
                 must match the one expected by the selected dataset.
+            train_selection: Optional list of ``event_no`` to use for
+                the train split, overriding the default selection file.
+                Must be a subset of the default train selection.
+            test_selection: Optional list of ``event_no`` to use for
+                the test split, overriding the default selection file.
+                Must be a subset of the default test selection.
+            backend: ``"sqlite"`` (default, ERDA-hosted) or ``"lmdb"``.
+                The on-disk layout under ``download_dir/<name>/`` is
+                parallel for both backends: SQLite expects
+                ``merged/merged.db`` while LMDB expects
+                ``merged/merged.lmdb``. Parquet selection files live at
+                ``selections/`` in either case. WIP: the LMDB backend
+                is currently produced locally by the
+                ``scripts/convert_sqlite_to_lmdb.py`` converter;
+                precomputed LMDBs will be ERDA-hosted in the future,
+                at which point ``prepare_data`` will download them
+                automatically just like SQLite.
+            pre_computed_representation: LMDB-only. Field name under
+                which the precomputed ``DataRepresentation`` was stored
+                at conversion time. Defaults to ``"GraphDefinition"``.
+                Set to ``None`` to read raw tables instead.
             **kwargs: Forwarded to :class:`ERDAHostedDataset`.
         """
         if name not in self._registry:
@@ -222,11 +252,18 @@ class NuBenchDataset(ERDAHostedDataset):
 
         self._name = name
         self._spec = spec
+        self._custom_train_selection = train_selection
+        self._custom_test_selection = test_selection
         self._experiment = spec.experiment
         self._comments = spec.comments
         self._features = spec.features
         self._event_truth = spec.event_truth
         self._file_hashes = {"sqlite": spec.erda_hash}
+        if spec.lmdb_erda_hash is not None:
+            # WIP: enables ERDA download for the LMDB backend once the
+            # converted databases are published.
+            self._file_hashes["lmdb"] = spec.lmdb_erda_hash
+        self._pre_computed_representation = pre_computed_representation
         # Seed with the training pulsemap; `_create_dataset` swaps it per
         # split so train/val/test can use different pulsemaps.
         self._pulsemaps = [spec.pulsemap_per_split["train"]]
@@ -234,7 +271,7 @@ class NuBenchDataset(ERDAHostedDataset):
         super().__init__(
             download_dir=download_dir,
             data_representation=data_representation,
-            backend="sqlite",
+            backend=backend,
             **kwargs,
         )
 
@@ -249,9 +286,27 @@ class NuBenchDataset(ERDAHostedDataset):
         return os.path.join(self._download_dir, self._name)
 
     def prepare_data(self) -> None:
-        """Download + extract via ERDAHostedDataset if files are missing."""
+        """Ensure dataset files are present.
+
+        For ``sqlite`` (and, once published, ``lmdb`` with an ERDA
+        hash) this triggers the ERDA download/extract when files are
+        missing. For ``lmdb`` without a published hash — the current
+        WIP state — nothing is downloaded: the LMDB must be produced
+        locally by ``scripts/convert_sqlite_to_lmdb.py`` and a clear
+        error is raised if it isn't there.
+        """
         if self._files_present():
             return
+        if self._backend == "lmdb" and "lmdb" not in self._file_hashes:
+            # WIP: no ERDA hash yet for converted LMDBs. Tell the user
+            # to run the local converter instead of trying to download.
+            raise FileNotFoundError(
+                f"NuBench dataset {self._name!r} (backend='lmdb'): "
+                f"expected {self._spec.lmdb_relpath} and parquet selection "
+                f"files under {self.dataset_dir}/selections/. Precomputed "
+                "LMDBs are not yet ERDA-hosted; run "
+                "scripts/convert_sqlite_to_lmdb.py first."
+            )
         super().prepare_data()
         if not self._files_present():
             raise FileNotFoundError(
@@ -261,10 +316,11 @@ class NuBenchDataset(ERDAHostedDataset):
 
     def _files_present(self) -> bool:
         """Check that the database and selection files exist on disk."""
-        required = [
-            self._spec.db_relpath,
-            *self._spec.selection_relpaths.values(),
-        ]
+        if self._backend == "lmdb":
+            db_rel = self._spec.lmdb_relpath
+        else:
+            db_rel = self._spec.db_relpath
+        required = [db_rel, *self._spec.selection_relpaths.values()]
         return all(
             os.path.exists(os.path.join(self.dataset_dir, rel))
             for rel in required
@@ -273,7 +329,10 @@ class NuBenchDataset(ERDAHostedDataset):
     def _prepare_args(
         self, backend: str, features: List[str], truth: List[str]
     ) -> Tuple[Dict[str, Any], Union[List[int], None], Union[List[int], None]]:
-        db_path = os.path.join(self.dataset_dir, self._spec.db_relpath)
+        if backend.lower() == "lmdb":
+            db_path = os.path.join(self.dataset_dir, self._spec.lmdb_relpath)
+        else:
+            db_path = os.path.join(self.dataset_dir, self._spec.db_relpath)
         train_sel = pd.read_parquet(
             os.path.join(
                 self.dataset_dir, self._spec.selection_relpaths["train"]
@@ -284,6 +343,15 @@ class NuBenchDataset(ERDAHostedDataset):
                 self.dataset_dir, self._spec.selection_relpaths["test"]
             )
         )["event_no"].tolist()
+
+        if self._custom_train_selection is not None:
+            train_sel = self._apply_custom_selection(
+                self._custom_train_selection, train_sel, "train"
+            )
+        if self._custom_test_selection is not None:
+            test_sel = self._apply_custom_selection(
+                self._custom_test_selection, test_sel, "test"
+            )
 
         dataset_args = {
             "path": db_path,
@@ -303,7 +371,25 @@ class NuBenchDataset(ERDAHostedDataset):
                 ),
             },
         }
+        if backend.lower() == "lmdb":
+            dataset_args["pre_computed_representation"] = (
+                self._pre_computed_representation
+            )
         return dataset_args, train_sel, test_sel
+
+    @staticmethod
+    def _apply_custom_selection(
+        custom: List[int], default: List[int], split: str
+    ) -> List[int]:
+        default_set = set(default)
+        missing = [e for e in custom if e not in default_set]
+        if missing:
+            raise ValueError(
+                f"Custom {split} selection is not a subset of the default "
+                f"{split} selection: {len(missing)} event_no(s) missing "
+                f"(e.g. {missing[:5]})."
+            )
+        return list(custom)
 
     def _create_dataset(
         self,
