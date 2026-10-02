@@ -456,6 +456,212 @@ class SpacetimeEncoder(LightningModule):
         return self.projection(self.sin_emb(self.scale * four_distance))
 
 
+class DirectionalSpacetimeEncoder(LightningModule):
+    """Embed the separation between every pair of steps, direction included.
+
+    `SpacetimeEncoder` reduces each pair to the interval `dx^2 - (c dt)^2`.
+    That fixes how space and time combine, forgets which step came first, and
+    cannot express effects of distance or direction alone, such as
+    attenuation, the delay scattered light accumulates, or an anisotropic
+    medium. This encoder embeds the range, the signed time difference, the
+    interval and the unit direction separately and lets an MLP combine them.
+    The interval stays in as a prior on which pairs can be causally
+    connected.
+
+    The separation vector enters in one of two forms. `"polar"` embeds the
+    range with the ladder and the unit direction with a few low frequencies,
+    which keeps distance-only effects apart from direction-only ones.
+    `"cartesian"` embeds each signed component and the range with the ladder,
+    which hands the MLP separations along the detector axes directly, such as
+    the vertical one along a string.
+
+    Given the columns of each step's sensor pointing direction, the encoder
+    also embeds the components of the difference of the two sensors'
+    directions. They say how far and in which direction the two orientations
+    differ (their length fixes the cosine) and, like the separation, change
+    sign with the order of the pair. Steps on one multi-sensor module share a
+    position, so without them such a pair differs only in time, however the
+    two sensors face.
+
+    Each medium has a learnable speed of light, applied to the time
+    difference before it is embedded. With more than one medium, each also
+    has a learnable code that modulates the embedded features before the MLP
+    (FiLM). Both start neutral, so every medium begins with the same map and
+    departs from it only as far as the data asks.
+    """
+
+    # Keeps the square roots and the unit direction finite for pairs with no
+    # separation, such as two pulses on the same sensor.
+    _EPS = 1e-12
+
+    def __init__(
+        self,
+        seq_length: int = 32,
+        output_dim: Optional[int] = None,
+        columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+        time_scale: float = 1.0,
+        scale: float = 1024.0,
+        clip: Optional[float] = 4.0,
+        n_freq: float = 10000.0,
+        n_direction_freq: int = 2,
+        hidden_dim: int = 32,
+        n_media: int = 1,
+        medium_dim: int = 16,
+        pair_features: str = "polar",
+        direction_columns: Optional[Tuple[int, int, int]] = None,
+    ):
+        """Construct `DirectionalSpacetimeEncoder`.
+
+        Args:
+            seq_length: Width of the sinusoidal embedding of each of the
+                range, the time difference and the interval.
+            output_dim: Width of the per-pair output. Defaults to
+                `seq_length`.
+            columns: Input columns holding `(x, y, z, t)`.
+            time_scale: Factor converting the time column into the position
+                columns' length unit, `t_scale * c / pos_scale` for the
+                normalisation in use. Each medium learns a multiplier on it.
+            scale: Multiplier applied before the sinusoidal ladders, as in
+                `SpacetimeEncoder`.
+            clip: Bound on the range, the time difference and the interval
+                before embedding, or None to leave them unbounded.
+            n_freq: Span of the frequency ladders.
+            n_direction_freq: Frequencies per component of the unit
+                direction. How a medium depends on direction is smooth, so a
+                few low frequencies suffice. Unused with `"cartesian"`.
+            hidden_dim: Width of the MLP combining the embeddings.
+            n_media: Number of media the input can come from.
+            medium_dim: Width of the learnable code of each medium. Unused
+                with a single medium, where a constant modulation adds
+                nothing the MLP cannot absorb.
+            pair_features: How the separation vector is embedded, `"polar"`
+                or `"cartesian"`; see the class docstring.
+            direction_columns: Input columns holding each step's sensor
+                pointing direction as a unit vector, or None to leave the
+                sensors' orientation out. Each component of half the
+                difference of the two directions is embedded with the
+                ladder.
+        """
+        if pair_features not in ("polar", "cartesian"):
+            raise ValueError(
+                f"pair_features must be 'polar' or 'cartesian', got "
+                f"{pair_features!r}"
+            )
+        super().__init__()
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        self.columns = columns
+        self.time_scale = time_scale
+        self.scale = scale
+        self.clip = clip
+        self.n_direction_freq = n_direction_freq
+        self.pair_features = pair_features
+        self.direction_columns = direction_columns
+        if pair_features == "polar":
+            in_dim = 3 * seq_length + 6 * n_direction_freq
+        else:
+            in_dim = 6 * seq_length
+        if direction_columns is not None:
+            in_dim += 3 * seq_length
+
+        self.log_speed = nn.Embedding(n_media, 1)
+        nn.init.zeros_(self.log_speed.weight)
+
+        self.medium_code: Optional[nn.Embedding] = None
+        self.film: Optional[nn.Linear] = None
+        if n_media > 1:
+            self.medium_code = nn.Embedding(n_media, medium_dim)
+            film = nn.Linear(medium_dim, 2 * in_dim)
+            nn.init.zeros_(film.weight)
+            nn.init.zeros_(film.bias)
+            self.film = film
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim or seq_length),
+        )
+
+    def forward(self, x: Tensor, medium: Optional[Tensor] = None) -> Tensor:
+        """Forward pass.
+
+        Args:
+            x: Padded steps, shape `[batch, length, features]`.
+            medium: Index of each event's medium, shape `[batch]`. Every
+                event is medium 0 if not given.
+
+        Returns:
+            Per-pair features, shape `[batch, length, length, output_dim]`.
+        """
+        if medium is None:
+            medium = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        xi, yi, zi, ti = self.columns
+        pos = x[:, :, [xi, yi, zi]]
+        time = x[:, :, ti]
+
+        speed = self.time_scale * torch.exp(self.log_speed(medium))
+        separation = pos[:, :, None] - pos[:, None, :]
+        range_sq = separation.pow(2).sum(-1)
+        distance = torch.sqrt(range_sq.clamp_min(self._EPS))
+        dt = speed.view(-1, 1, 1) * (time[:, :, None] - time[:, None, :])
+        interval = range_sq - dt.pow(2)
+        four_distance = torch.sign(interval) * torch.sqrt(
+            interval.abs().clamp_min(self._EPS)
+        )
+        # The unit direction is taken before clipping, so a clipped range
+        # cannot distort it.
+        direction = separation / distance.unsqueeze(-1)
+        if self.clip is not None:
+            separation = separation.clamp(-self.clip, self.clip)
+            distance = distance.clamp_max(self.clip)
+            dt = dt.clamp(-self.clip, self.clip)
+            four_distance = four_distance.clamp(-self.clip, self.clip)
+
+        ladders = [
+            self.sin_emb(self.scale * distance),
+            self.sin_emb(self.scale * dt),
+            self.sin_emb(self.scale * four_distance),
+        ]
+        if self.pair_features == "cartesian":
+            ladders += [
+                self.sin_emb(self.scale * separation[..., k]) for k in range(3)
+            ]
+        else:
+            # The lowest frequency spans half a period over [-1, 1], so
+            # opposite directions stay distinct.
+            direction_freq = (
+                0.5
+                * torch.pi
+                * torch.arange(
+                    1,
+                    self.n_direction_freq + 1,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+            )
+            angles = direction.unsqueeze(-1) * direction_freq
+            ladders += [
+                torch.sin(angles).flatten(-2),
+                torch.cos(angles).flatten(-2),
+            ]
+        if self.direction_columns is not None:
+            pointing = x[:, :, list(self.direction_columns)]
+            # Halved into [-1, 1], the range of a direction component.
+            half_difference = 0.5 * (
+                pointing[:, :, None] - pointing[:, None, :]
+            )
+            ladders += [
+                self.sin_emb(self.scale * half_difference[..., k])
+                for k in range(3)
+            ]
+        features = torch.cat(ladders, dim=-1)
+        if self.film is not None and self.medium_code is not None:
+            gamma, beta = self.film(self.medium_code(medium)).chunk(2, dim=-1)
+            features = (
+                features * (1 + gamma[:, None, None]) + beta[:, None, None]
+            )
+        return self.mlp(features)
+
+
 class RRWPLinearNodeEncoder(LightningModule):
     """Relative random walk probability node encoder.
 
