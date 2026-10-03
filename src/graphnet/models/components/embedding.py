@@ -192,7 +192,15 @@ class FourierEncoderEPJC(LightningModule):
         x: Tensor,
         seq_length: Tensor,
     ) -> Tensor:
-        """Forward pass."""
+        """Forward pass.
+
+        `x` may be a padded sequence [B, L, D] or a jagged `NestedTensor`
+        [B, j, D]. The encoding is per-pulse, so on jagged input it runs on
+        the flat values buffer -- no compute on padding -- and is rewrapped
+        with the input's offsets.
+        """
+        if x.is_nested:
+            return self._forward_jagged(x, seq_length)
         length = torch.log10(seq_length.to(dtype=x.dtype))
         embeddings = [self.sin_emb(4096 * x[:, :, :3]).flatten(-2)]  # Position
 
@@ -212,6 +220,41 @@ class FourierEncoderEPJC(LightningModule):
         x = self.mlp(x)
 
         return x
+
+    def _forward_jagged(self, x: Tensor, seq_length: Tensor) -> Tensor:
+        """Encode a jagged `NestedTensor` on its dense values buffer.
+
+        All compute happens on the flat [total_pulses, D] buffer: jagged
+        eager kernels do not cover every op used here (notably under
+        `torch.inference_mode`), whereas dense ops always work and are
+        mathematically identical because the encoding is per-pulse.
+        """
+        v = x.values()
+        length = torch.log10(seq_length.to(dtype=v.dtype))
+        embeddings = [self.sin_emb(4096 * v[:, :3]).flatten(-2)]  # Position
+
+        if self.n_features >= 5:
+            embeddings.append(self.sin_emb(1024 * v[:, 4]))  # Charge
+
+        embeddings.append(self.sin_emb(4096 * v[:, 3]))  # Time
+
+        if self.n_features >= 6:
+            embeddings.append(self.aux_emb(v[:, 5].long()))  # Auxiliary
+
+        # Each pulse receives its event's length embedding; indexing per
+        # pulse replaces the padded route's expand to the batch-max length.
+        batch_idx = torch.repeat_interleave(
+            torch.arange(seq_length.numel(), device=v.device), seq_length
+        )
+        embeddings.append(self.sin_emb2(length)[batch_idx])  # Length
+
+        out = self.mlp(torch.cat(embeddings, -1))
+        return torch.nested.nested_tensor_from_jagged(
+            out,
+            x.offsets(),
+            min_seqlen=x._get_min_seqlen(),
+            max_seqlen=x._get_max_seqlen(),
+        )
 
 
 class FourierEncoder(LightningModule):
@@ -698,6 +741,46 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 features * (1 + gamma[:, None, None]) + beta[:, None, None]
             )
         return self.mlp(features)
+
+
+class SpacetimeDistance(LightningModule):
+    """Signed spacetime four-distance between every pair of steps.
+
+    The scalar `SpacetimeEncoder` embeds; returned raw (and clipped) rather
+    than embedded, for an ALiBi-style bias that scales it per head instead of
+    projecting it into a per-pair feature vector. Being `[B, L, L]` rather
+    than `[B, L, L, C]` it is `C` times cheaper to hold.
+
+    A positive distance is a spacelike pair -- one that no signal could have
+    connected -- and a negative one is timelike, so a monotone bias in this
+    quantity is a soft causal prior.
+    """
+
+    def __init__(
+        self,
+        clip: float = 4.0,
+        columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+        time_scale: float = 1.0,
+    ):
+        """Construct `SpacetimeDistance`.
+
+        Args:
+            clip: Bound on the returned distance. The tail is heavy and
+                unbounded, so an unclipped bias would let a few far-separated
+                pairs dominate the attention logits.
+            columns: Input columns holding `(x, y, z, t)`.
+            time_scale: Factor converting the time column into the position
+                columns' length unit; see `SpacetimeEncoder`.
+        """
+        super().__init__()
+        self.clip = clip
+        self.columns = columns
+        self.time_scale = time_scale
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Forward pass."""
+        four_distance = signed_four_distance(x, self.time_scale, self.columns)
+        return four_distance.clip(-self.clip, self.clip)
 
 
 class RRWPLinearNodeEncoder(LightningModule):
