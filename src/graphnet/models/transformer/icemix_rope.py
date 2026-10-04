@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from graphnet.models.components.attention_blocks import Block
 from graphnet.models.gnn.gnn import GNN
+from graphnet.models.transformer.icemix import DeepIce
 from graphnet.models.transformer.inputs import (
     FourierSchema,
     build_fourier_tokenizer,
@@ -64,6 +65,7 @@ class DeepIceRope(GNN):
         coordinate_features: Optional[Sequence[str]] = None,
         rope_axis_bands: Optional[Sequence[Tuple[float, float]]] = None,
         qk_norm: bool = False,
+        pooling: str = "cls",
     ):
         """Construct `DeepIceRope`.
 
@@ -119,6 +121,12 @@ class DeepIceRope(GNN):
             qk_norm: Per-head RMSNorm on queries and keys before they are
                 rotated, bounding the growth of the attention logits. The
                 rotation leaves the normalised length unchanged.
+            pooling: How the per-pulse embeddings become the one event
+                vector the task head reads. `"cls"` prepends a learned
+                token, which carries no coordinates and is not rotated, and
+                returns its output; `"mean"` averages the pulses and runs no
+                extra token. As on `DeepIce`, the `cls_token` parameter
+                exists either way, so a checkpoint loads under both.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -127,6 +135,11 @@ class DeepIceRope(GNN):
                 "(2D rotation pairs split over 4 coordinates), got "
                 f"{head_size}."
             )
+        if pooling not in ("cls", "mean"):
+            raise ValueError(
+                f"pooling must be 'cls' or 'mean', got {pooling!r}"
+            )
+        self.pooling = pooling
         if coordinate_features is None and n_features < 5:
             raise ValueError(
                 "DeepIceRope assumes the NuBench feature order "
@@ -272,35 +285,53 @@ class DeepIceRope(GNN):
             max_seqlen=x._get_max_seqlen() + 1,
         )
 
+    def _rope_table(
+        self, cos: Tensor, sin: Tensor, batch_idx: Tensor, batch_size: int
+    ) -> Tuple[Tensor, Tensor]:
+        """Lay the pulses' rotations out over the token stream.
+
+        With mean pooling the tokens are the pulses. With a class token
+        every event has one more leading slot, which keeps cos=1 / sin=0,
+        the identity rotation: the token has no coordinates.
+        """
+        if self.pooling == "mean":
+            return cos, sin
+        n_pulses = cos.shape[0]
+        shape = (n_pulses + batch_size, *cos.shape[1:])
+        rope_cos = cos.new_ones(shape)
+        rope_sin = sin.new_zeros(shape)
+        pos = torch.arange(n_pulses, device=cos.device) + batch_idx + 1
+        rope_cos[pos] = cos
+        rope_sin[pos] = sin
+        return rope_cos, rope_sin
+
     def _rope_angles(
         self, features: Tensor, batch_idx: Tensor, batch_size: int
-    ) -> tuple:
-        """Per-token rotation angles for the cls-prepended jagged stream.
+    ) -> Tuple[Tensor, Tensor]:
+        """Per-token cosine and sine of the rotation angles.
 
         Coordinates are (x, y, z, t), read from the columns
         `coordinate_features` names; by default 0-2 and 4, the NuBench
-        order, whose column 3 is charge. The cls slot of every event keeps
-        cos=1 / sin=0, the identity rotation.
+        order, whose column 3 is charge.
         """
         coords = features[:, self._coordinate_columns].float()
         angles = coords[:, self.rope_axis] * self.rope_omega
-        n_pulses = coords.shape[0]
-        rope_cos = angles.new_ones((n_pulses + batch_size, angles.shape[1]))
-        rope_sin = angles.new_zeros((n_pulses + batch_size, angles.shape[1]))
-        pos = torch.arange(n_pulses, device=angles.device) + batch_idx + 1
-        rope_cos[pos] = torch.cos(angles)
-        rope_sin[pos] = torch.sin(angles)
-        return rope_cos, rope_sin
+        return self._rope_table(
+            torch.cos(angles), torch.sin(angles), batch_idx, batch_size
+        )
 
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
         x, _, seq_length = array_to_sequence(data.x, data.batch, nested=True)
         x = embed_pulses(self.fourier_ext, self.fourier_mlp, x, seq_length)
-        x = self._prepend_cls_nested(x, data.batch)
+        if self.pooling == "cls":
+            x = self._prepend_cls_nested(x, data.batch)
         rope_cos, rope_sin = self._rope_angles(
             data.x, data.batch, seq_length.numel()
         )
         x = self._blocks_fn(x, rope_cos=rope_cos, rope_sin=rope_sin)
+        if self.pooling == "mean":
+            return DeepIce._mean_pool(x.values(), data.batch, seq_length)
         # The cls token output of each event sits at its sequence start.
         return x.values()[x.offsets()[:-1]]
 

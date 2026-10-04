@@ -124,6 +124,7 @@ class DeepIceRopeND(DeepIceRope):
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
         qk_norm: bool = False,
+        pooling: str = "cls",
     ):
         """Construct `DeepIceRopeND`.
 
@@ -160,6 +161,7 @@ class DeepIceRopeND(DeepIceRope):
             coordinate_features: See `DeepIceRope`. `axis_scales` follow the
                 same (x, y, z, t) order.
             qk_norm: See `DeepIceRope`.
+            pooling: See `DeepIceRope`.
         """
         super().__init__(
             hidden_dim=hidden_dim,
@@ -178,6 +180,7 @@ class DeepIceRopeND(DeepIceRope):
             fourier_kwargs=fourier_kwargs,
             coordinate_features=coordinate_features,
             qk_norm=qk_norm,
+            pooling=pooling,
         )
         n_dims = 4
         n_heads = hidden_dim // head_size
@@ -230,9 +233,9 @@ class DeepIceRopeND(DeepIceRope):
         Coordinates are (x, y, z, t), read from the columns
         `coordinate_features` names; by default 0-2 and 4, the NuBench
         order, whose column 3 is charge. Returns
-        `[tokens, heads, head_size // 2]` cosine/sine pairs; the cls slot of
-        every event and any rotation plane beyond `rope_planes` keep
-        cos = 1 / sin = 0, the identity rotation.
+        `[tokens, heads, head_size // 2]` cosine/sine pairs; any rotation
+        plane beyond `rope_planes` keeps cos = 1 / sin = 0, the identity
+        rotation.
         """
         # The phase is accumulated in float64 and only the bounded cosine
         # and sine are cast down. Detector time carries a large axis scale,
@@ -248,15 +251,9 @@ class DeepIceRopeND(DeepIceRope):
         angles = (projected.unsqueeze(-1) * self.rope_scales).flatten(-2)
 
         n_pulses, n_heads, _ = angles.shape
-        planes = self.rope_half
-        shape = (n_pulses + batch_size, n_heads, planes)
-        rope_cos = features.new_ones(shape)
-        rope_sin = features.new_zeros(shape)
-        pos = torch.arange(n_pulses, device=angles.device) + batch_idx + 1
-        rope_cos[pos, :, : self.rope_planes] = torch.cos(angles).to(
-            features.dtype
-        )
-        rope_sin[pos, :, : self.rope_planes] = torch.sin(angles).to(
-            features.dtype
-        )
-        return rope_cos, rope_sin
+        shape = (n_pulses, n_heads, self.rope_half)
+        cos = features.new_ones(shape)
+        sin = features.new_zeros(shape)
+        cos[:, :, : self.rope_planes] = torch.cos(angles).to(features.dtype)
+        sin[:, :, : self.rope_planes] = torch.sin(angles).to(features.dtype)
+        return self._rope_table(cos, sin, batch_idx, batch_size)

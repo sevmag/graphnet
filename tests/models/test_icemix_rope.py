@@ -83,3 +83,59 @@ def test_qk_norm_reaches_every_block(
         out = normed(_batch())
     assert out.shape == (3, sizes["hidden_dim"])
     assert torch.isfinite(out).all()
+
+
+@BOTH
+def test_mean_pooling_reads_each_event_alone(
+    model_class: type, sizes: Dict[str, int]
+) -> None:
+    """An event's vector is the same alone as inside a batch."""
+    model = _rope(model_class, pooling="mean", **sizes)
+    batch = _batch()
+    with torch.no_grad():
+        together = model(batch)
+        for i, event in enumerate(batch.to_data_list()):
+            alone = model(Batch.from_data_list([event]))
+            torch.testing.assert_close(
+                alone[0], together[i], atol=1e-5, rtol=1e-4
+            )
+
+
+@BOTH
+def test_mean_pooling_ignores_the_pulse_order(
+    model_class: type, sizes: Dict[str, int]
+) -> None:
+    """Pulses are a set: only their coordinates place them."""
+    model = _rope(model_class, pooling="mean", **sizes)
+    event = _batch([25])
+    shuffled = event.clone()
+    shuffled.x = event.x[torch.randperm(25, generator=torch.manual_seed(3))]
+    with torch.no_grad():
+        torch.testing.assert_close(
+            model(shuffled), model(event), atol=1e-5, rtol=1e-4
+        )
+
+
+@BOTH
+def test_mean_pooling_runs_no_class_token(
+    model_class: type, sizes: Dict[str, int]
+) -> None:
+    """The rotation table then has one row per pulse and no more."""
+    batch = _batch()
+    n_pulses, n_events = batch.x.shape[0], 3
+    mean = _rope(model_class, pooling="mean", **sizes)
+    cos, _ = mean._rope_angles(batch.x, batch.batch, n_events)
+    assert cos.shape[0] == n_pulses
+
+    cls = _rope(model_class, **sizes)
+    cos, _ = cls._rope_angles(batch.x, batch.batch, n_events)
+    assert cos.shape[0] == n_pulses + n_events
+    cls.load_state_dict(mean.state_dict())
+    with torch.no_grad():
+        assert not torch.allclose(mean(batch), cls(batch), atol=1e-3)
+
+
+def test_unknown_pooling_raises() -> None:
+    """Only the two readouts exist."""
+    with pytest.raises(ValueError, match="pooling"):
+        _rope(pooling="max")
