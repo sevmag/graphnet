@@ -86,8 +86,10 @@ class ISeeCube(GNN):
 
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
-        x, _, _ = array_to_sequence(data.x, data.batch, padding_value=0)
-        x = self.fourier_ext(x)
+        x, _, seq_length = array_to_sequence(
+            data.x, data.batch, padding_value=0
+        )
+        x = self.fourier_ext(x, seq_length)
         batch_size = x.shape[0]
 
         x += self.pos_embedding
