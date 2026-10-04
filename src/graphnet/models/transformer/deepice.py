@@ -9,17 +9,20 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, List, Optional, Tuple, Union, Callable
+from typing import Set, Dict, Any, List, Optional, Callable
 
 from graphnet.models.components.attention_blocks import (
     Block_rel,
     Block,
 )
 from graphnet.models.components.embedding import (
-    FourierEncoder,
-    FourierEncoderEPJC,
     SpacetimeDistance,
     SpacetimeEncoder,
+)
+from graphnet.models.transformer.inputs import (
+    FourierSchema,
+    build_fourier_tokenizer,
+    embed_pulses,
 )
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
@@ -55,9 +58,7 @@ class DeepIce(GNN):
         spacetime_scale: float = 1024.0,
         spacetime_n_freq: float = 10000.0,
         spacetime_clip: float = 4.0,
-        fourier_schema: Optional[
-            Dict[str, Union[float, Tuple[float, float]]]
-        ] = None,
+        fourier_schema: Optional[FourierSchema] = None,
         input_feature_names: Optional[List[str]] = None,
         compile_blocks: bool = False,
         rel_attention: str = "dense",
@@ -148,48 +149,15 @@ class DeepIce(GNN):
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
-        self.fourier_mlp: Optional[nn.Module] = None
-        if fourier_schema is None:
-            self.fourier_ext: nn.Module = FourierEncoderEPJC(
-                seq_length=seq_length,
-                mlp_dim=fourier_mlp_dim,
-                output_dim=fourier_out_dim,
-                scaled=scaled_emb,
-                n_features=n_features,
-            )
-        else:
-            # Naming the features is what makes a change of input order raise
-            # rather than shift every multiplier onto a neighbouring column.
-            names = input_feature_names or []
-            unknown = set(fourier_schema) - set(names)
-            if unknown:
-                raise ValueError(
-                    f"fourier_schema names {sorted(unknown)}, not among the "
-                    f"input features {names}."
-                )
-            self.fourier_ext = FourierEncoder(
-                schema={
-                    names.index(n): (
-                        (float(v[0]), float(v[1]))
-                        if isinstance(v, (tuple, list))
-                        else float(v)
-                    )
-                    for n, v in fourier_schema.items()
-                },
-                seq_length=seq_length,
-                scaled=scaled_emb,
-            )
-            # The general encoder leaves this projection to the model.
-            concat_dim = self.fourier_ext.output_dim
-            mlp_dim = (
-                concat_dim if fourier_mlp_dim is None else fourier_mlp_dim
-            )
-            self.fourier_mlp = nn.Sequential(
-                nn.Linear(concat_dim, mlp_dim),
-                nn.LayerNorm(mlp_dim),
-                nn.GELU(),
-                nn.Linear(mlp_dim, fourier_out_dim),
-            )
+        self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
+            seq_length=seq_length,
+            output_dim=fourier_out_dim,
+            scaled=scaled_emb,
+            n_features=n_features,
+            fourier_schema=fourier_schema,
+            input_feature_names=input_feature_names,
+            mlp_dim=fourier_mlp_dim,
+        )
         if rel_attention not in ("dense", "tiled", "flash"):
             raise ValueError(
                 f"rel_attention must be 'dense', 'tiled' or "
@@ -452,9 +420,7 @@ class DeepIce(GNN):
             data.x, data.batch, padding_value=0
         )
         assert mask is not None
-        x = self.fourier_ext(x0, seq_length)
-        if self.fourier_mlp is not None:
-            x = self.fourier_mlp(x)
+        x = embed_pulses(self.fourier_ext, self.fourier_mlp, x0, seq_length)
         if self.include_dynedge:
             graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
