@@ -15,11 +15,15 @@ import math
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Callable, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from graphnet.models.components.attention_blocks import Block
-from graphnet.models.components.embedding import FourierEncoderEPJC
 from graphnet.models.gnn.gnn import GNN
+from graphnet.models.transformer.inputs import (
+    FourierSchema,
+    build_fourier_tokenizer,
+    embed_pulses,
+)
 from graphnet.models.utils import array_to_sequence
 
 from torch_geometric.data import Data
@@ -41,6 +45,10 @@ class DeepIceRope(GNN):
         n_features: int = 5,
         rope_per_axis: bool = True,
         compile_blocks: bool = False,
+        fourier_schema: Optional[FourierSchema] = None,
+        input_feature_names: Optional[List[str]] = None,
+        fourier_mlp_dim: Optional[int] = None,
+        fourier_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """Construct `DeepIceRope`.
 
@@ -69,6 +77,18 @@ class DeepIceRope(GNN):
                 step; compiling the whole stack as one graph is what turns
                 it from slower-than-padded (eager) into faster. No effect
                 on numerics.
+            fourier_schema: `{feature name: multiplier}` or
+                `{feature name: (multiplier, n_freq)}` for the columns to
+                embed, resolved against `input_feature_names`. Unset, the
+                encoder is `FourierEncoderEPJC` with its fixed layout.
+            input_feature_names: Input column names, in order. Required with
+                `fourier_schema`.
+            fourier_mlp_dim: Hidden width of the projection that turns the
+                concatenated sinusoidal features into `hidden_dim`. Unset, it
+                is the concatenation's own width.
+            fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
+                `add_sequence_length` and `phase_dtype`. Only with
+                `fourier_schema`.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -83,12 +103,15 @@ class DeepIceRope(GNN):
                 "(x, y, z, charge, t) and reads the time coordinate "
                 f"from column 4; got n_features={n_features}."
             )
-        self.fourier_ext = FourierEncoderEPJC(
+        self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
             seq_length=seq_length,
-            mlp_dim=None,
             output_dim=hidden_dim,
             scaled=scaled_emb,
             n_features=n_features,
+            fourier_schema=fourier_schema,
+            input_feature_names=input_feature_names,
+            mlp_dim=fourier_mlp_dim,
+            fourier_kwargs=fourier_kwargs,
         )
         # The `sandwich`/`blocks` split mirrors `DeepIce`'s module layout,
         # so weights transfer between the two classes via plain state_dicts.
@@ -227,7 +250,7 @@ class DeepIceRope(GNN):
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
         x, _, seq_length = array_to_sequence(data.x, data.batch, nested=True)
-        x = self.fourier_ext(x, seq_length)
+        x = embed_pulses(self.fourier_ext, self.fourier_mlp, x, seq_length)
         x = self._prepend_cls_nested(x, data.batch)
         rope_cos, rope_sin = self._rope_angles(
             data.x, data.batch, seq_length.numel()
