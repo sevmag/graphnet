@@ -66,6 +66,7 @@ class DeepIce(GNN):
         tiled_checkpoint: bool = True,
         pooling: str = "cls",
         fourier_mlp_dim: Optional[int] = None,
+        fourier_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """Construct `DeepIce`.
 
@@ -146,6 +147,9 @@ class DeepIce(GNN):
                 is pure width: unlike `seq_length` it carries no spectral
                 meaning, so narrowing it trades capacity without moving any
                 sinusoidal band.
+            fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
+                `add_sequence_length` and `phase_dtype`. Only with
+                `fourier_schema`.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -157,6 +161,7 @@ class DeepIce(GNN):
             fourier_schema=fourier_schema,
             input_feature_names=input_feature_names,
             mlp_dim=fourier_mlp_dim,
+            fourier_kwargs=fourier_kwargs,
         )
         if rel_attention not in ("dense", "tiled", "flash"):
             raise ValueError(
