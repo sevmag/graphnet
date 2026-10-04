@@ -15,7 +15,7 @@ import math
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from graphnet.models.components.attention_blocks import Block
 from graphnet.models.gnn.gnn import GNN
@@ -23,6 +23,7 @@ from graphnet.models.transformer.inputs import (
     FourierSchema,
     build_fourier_tokenizer,
     embed_pulses,
+    resolve_coordinates,
 )
 from graphnet.models.utils import array_to_sequence
 
@@ -49,6 +50,7 @@ class DeepIceRope(GNN):
         input_feature_names: Optional[List[str]] = None,
         fourier_mlp_dim: Optional[int] = None,
         fourier_kwargs: Optional[Dict[str, Any]] = None,
+        coordinate_features: Optional[Sequence[str]] = None,
     ):
         """Construct `DeepIceRope`.
 
@@ -64,9 +66,10 @@ class DeepIceRope(GNN):
                 relative-attention sandwich, keeping the total depth at
                 `depth_rel + depth`.
             scaled_emb: Whether to scale the sinusoidal positional embeddings.
-            n_features: The number of features in the input data. At least
+            n_features: The number of features in the input data, read by
+                `FourierEncoderEPJC`. Without `coordinate_features` at least
                 5, in the NuBench order (x, y, z, charge, t): the rotation
-                reads the coordinates from columns 0-2 and time from
+                then reads the coordinates from columns 0-2 and time from
                 column 4.
             rope_per_axis: Use a separate geometric RoPE frequency band per
                 coordinate (x, y, z, t), matched to the measured range of
@@ -82,13 +85,17 @@ class DeepIceRope(GNN):
                 embed, resolved against `input_feature_names`. Unset, the
                 encoder is `FourierEncoderEPJC` with its fixed layout.
             input_feature_names: Input column names, in order. Required with
-                `fourier_schema`.
+                `fourier_schema` and `coordinate_features`.
             fourier_mlp_dim: Hidden width of the projection that turns the
                 concatenated sinusoidal features into `hidden_dim`. Unset, it
                 is the concatenation's own width.
             fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
                 `add_sequence_length` and `phase_dtype`. Only with
                 `fourier_schema`.
+            coordinate_features: Names of the x, y, z and time features, in
+                that order, resolved against `input_feature_names`: the
+                columns the rotation reads. Unset, they are columns 0-2 and
+                4.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -97,7 +104,7 @@ class DeepIceRope(GNN):
                 "(2D rotation pairs split over 4 coordinates), got "
                 f"{head_size}."
             )
-        if n_features < 5:
+        if coordinate_features is None and n_features < 5:
             raise ValueError(
                 "DeepIceRope assumes the NuBench feature order "
                 "(x, y, z, charge, t) and reads the time coordinate "
@@ -112,6 +119,14 @@ class DeepIceRope(GNN):
             input_feature_names=input_feature_names,
             mlp_dim=fourier_mlp_dim,
             fourier_kwargs=fourier_kwargs,
+        )
+        self._coordinate_columns = list(
+            resolve_coordinates(
+                coordinate_features,
+                input_feature_names,
+                "coordinate_features",
+                default=(0, 1, 2, 4),
+            )
         )
         # The `sandwich`/`blocks` split mirrors `DeepIce`'s module layout,
         # so weights transfer between the two classes via plain state_dicts.
@@ -233,11 +248,12 @@ class DeepIceRope(GNN):
     ) -> tuple:
         """Per-token rotation angles for the cls-prepended jagged stream.
 
-        Coordinates are (x, y, z, t); with the NuBench feature order the
-        time column is index 4, not 3 (index 3 is charge). The cls slot
-        of every event keeps cos=1 / sin=0, the identity rotation.
+        Coordinates are (x, y, z, t), read from the columns
+        `coordinate_features` names; by default 0-2 and 4, the NuBench
+        order, whose column 3 is charge. The cls slot of every event keeps
+        cos=1 / sin=0, the identity rotation.
         """
-        coords = features[:, [0, 1, 2, 4]].float()
+        coords = features[:, self._coordinate_columns].float()
         angles = coords[:, self.rope_axis] * self.rope_omega
         n_pulses = coords.shape[0]
         rope_cos = angles.new_ones((n_pulses + batch_size, angles.shape[1]))
