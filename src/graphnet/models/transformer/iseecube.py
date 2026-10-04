@@ -64,11 +64,11 @@ class ISeeCube(GNN):
         )
 
         self.class_token = nn.Parameter(
-            torch.empty(1, 1, hidden_dim),
+            torch.empty(1, 1, hidden_dim).normal_(std=0.02),
             requires_grad=True,
         )
         self.register_tokens = nn.Parameter(
-            torch.empty(1, num_register_tokens, hidden_dim),
+            torch.empty(1, num_register_tokens, hidden_dim).normal_(std=0.02),
             requires_grad=True,
         )
 
