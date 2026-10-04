@@ -50,9 +50,9 @@ class DeepIceRope(GNN):
         hidden_dim: int = 384,
         mlp_ratio: int = 4,
         seq_length: int = 192,
-        depth: int = 12,
+        depth: int = 16,
         head_size: int = 32,
-        depth_rel: int = 4,
+        depth_rel: int = 0,
         scaled_emb: bool = False,
         n_features: int = 5,
         rope_per_axis: bool = True,
@@ -71,12 +71,14 @@ class DeepIceRope(GNN):
             mlp_ratio: Mlp expansion ratio of FourierEncoderEPJC and
                 Transformer.
             seq_length: The base feature dimension.
-            depth: The depth of the transformer.
+            depth: The number of transformer blocks. Every block rotates.
             head_size: The size of the attention heads. Must be divisible
                 by 8 (2D rotation pairs split over 4 coordinates).
-            depth_rel: The number of blocks standing in for `DeepIce`'s
-                relative-attention sandwich, keeping the total depth at
-                `depth_rel + depth`.
+            depth_rel: Further blocks, run ahead of the `depth` ones and
+                held in a separate module list. They are the same blocks;
+                the split only reproduces the state-dict layout of
+                `DeepIce`, whose leading blocks are of another kind, for
+                checkpoints and callers built on that layout.
             scaled_emb: Whether to scale the sinusoidal positional embeddings.
             n_features: The number of features in the input data, read by
                 `FourierEncoderEPJC`. Without `coordinate_features` at least

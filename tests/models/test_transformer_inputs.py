@@ -91,9 +91,8 @@ def _rope(model_class: type = DeepIceRope, **overrides: Any) -> DeepIceRope:
     kwargs: Dict[str, Any] = dict(
         hidden_dim=HIDDEN_DIM,
         seq_length=SEQ_LENGTH,
-        depth=2,
+        depth=3,
         head_size=16,
-        depth_rel=1,
     )
     kwargs.update(overrides)
     torch.manual_seed(0)

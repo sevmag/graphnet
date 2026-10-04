@@ -109,9 +109,9 @@ class DeepIceRopeND(DeepIceRope):
         hidden_dim: int = 384,
         mlp_ratio: int = 4,
         seq_length: int = 192,
-        depth: int = 12,
+        depth: int = 16,
         head_size: int = 32,
-        depth_rel: int = 4,
+        depth_rel: int = 0,
         scaled_emb: bool = False,
         n_features: int = 5,
         compile_blocks: bool = False,
@@ -130,13 +130,12 @@ class DeepIceRopeND(DeepIceRope):
             hidden_dim: The latent feature dimension.
             mlp_ratio: Mlp expansion ratio of FourierEncoder and Transformer.
             seq_length: The base feature dimension.
-            depth: The depth of the transformer.
+            depth: The number of transformer blocks.
             head_size: The size of the attention heads. Divisibility by
                 `2 * (n_dims + 1)` = 10 uses every rotation plane; at other
                 sizes the remainder is left unrotated (see the module
                 docstring).
-            depth_rel: The number of blocks standing in for `DeepIce`'s
-                relative-attention sandwich.
+            depth_rel: See `DeepIceRope`.
             scaled_emb: Whether to scale the sinusoidal positional
                 embeddings.
             n_features: The number of features in the input data; see
