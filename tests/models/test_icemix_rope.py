@@ -1,11 +1,13 @@
 """Tests for the options of the rotary DeepIce models."""
 
+import math
 from typing import Any, Dict, List
 
 import pytest
 import torch
 from torch_geometric.data import Batch, Data
 
+from graphnet.models.components.attention_blocks import apply_spacetime_rope
 from graphnet.models.transformer import DeepIceRope, DeepIceRopeND
 
 # A head size both constructions accept: divisible by 8 and by 10.
@@ -139,3 +141,60 @@ def test_unknown_pooling_raises() -> None:
     """Only the two readouts exist."""
     with pytest.raises(ValueError, match="pooling"):
         _rope(pooling="max")
+
+
+def test_rope_per_head_spreads_each_band_over_the_heads() -> None:
+    """Together the heads hold one geometric ladder per axis."""
+    bands = [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0), (0.4, 4000.0)]
+    model = _rope(rope_axis_bands=bands, rope_per_head=True)
+    n_heads, pairs = 4, 2
+    omega = model.rope_omega.view(n_heads, 4, pairs)
+    for axis, (lo, hi) in enumerate(bands):
+        ladder = torch.logspace(
+            math.log10(lo), math.log10(hi), n_heads * pairs, dtype=omega.dtype
+        )
+        # Head h holds the h-th frequency and every n_heads-th after it.
+        torch.testing.assert_close(omega[:, axis].T.flatten(), ladder)
+
+
+def test_rope_per_head_logit_depends_only_on_displacement() -> None:
+    """Each head's own table still makes the encoding relative."""
+    torch.manual_seed(0)
+    model = _rope(rope_axis_bands=[(0.5, 50.0)] * 4, rope_per_head=True)
+    heads, head_dim = 4, 16
+    q = torch.randn(2, heads * head_dim)
+    k = torch.randn(2, heads * head_dim)
+
+    def logits(feats: torch.Tensor) -> torch.Tensor:
+        # One event, so one class-token slot precedes the two pulse rows.
+        cos, sin = model._rope_angles(feats, torch.zeros(2).long(), 1)
+        cos, sin = cos[1:3], sin[1:3]
+        assert cos.shape == (2, heads, head_dim // 2)
+        qh = apply_spacetime_rope(q, cos, sin, heads, head_dim)
+        kh = apply_spacetime_rope(k, cos, sin, heads, head_dim)
+        return (qh[0] * kh[1]).unflatten(-1, [heads, head_dim]).sum(-1)
+
+    feats = torch.randn(2, 5)
+    # Column 3 is charge in the default NuBench order; time is column 4.
+    shift = torch.tensor([0.7, -1.3, 0.2, 0.0, 0.4])
+    torch.testing.assert_close(
+        logits(feats), logits(feats + shift), atol=1e-3, rtol=1e-3
+    )
+    moved = feats.clone()
+    moved[1, 0] += 0.5
+    assert not torch.allclose(logits(feats), logits(moved), atol=1e-2)
+
+
+def test_rope_per_head_needs_per_axis_bands() -> None:
+    """There is no per-axis band to spread under the single shared ladder."""
+    with pytest.raises(ValueError, match="rope_per_head"):
+        _rope(rope_per_axis=False, rope_per_head=True)
+
+
+def test_rope_per_head_forward_is_finite() -> None:
+    """End to end, with the normalisation and the mean readout."""
+    model = _rope(rope_per_head=True, qk_norm=True, pooling="mean")
+    with torch.no_grad():
+        out = model(_batch())
+    assert out.shape == (3, HIDDEN_DIM)
+    assert torch.isfinite(out).all()

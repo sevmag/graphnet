@@ -66,6 +66,7 @@ class DeepIceRope(GNN):
         rope_axis_bands: Optional[Sequence[Tuple[float, float]]] = None,
         qk_norm: bool = False,
         pooling: str = "cls",
+        rope_per_head: bool = False,
     ):
         """Construct `DeepIceRope`.
 
@@ -127,6 +128,12 @@ class DeepIceRope(GNN):
                 returns its output; `"mean"` averages the pulses and runs no
                 extra token. As on `DeepIce`, the `cls_token` parameter
                 exists either way, so a checkpoint loads under both.
+            rope_per_head: Spread each axis's band over the heads: the band
+                is sampled at `n_heads` times as many frequencies and head
+                `h` takes every `n_heads`-th one from the `h`-th on. Every
+                head still spans the whole band, and together the heads
+                resolve it `n_heads` times as finely as when they all
+                repeat one ladder. Only with `rope_per_axis`.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -145,6 +152,11 @@ class DeepIceRope(GNN):
                 "DeepIceRope assumes the NuBench feature order "
                 "(x, y, z, charge, t) and reads the time coordinate "
                 f"from column 4; got n_features={n_features}."
+            )
+        if rope_per_head and not rope_per_axis:
+            raise ValueError(
+                "rope_per_head spreads the per-axis bands over the heads, "
+                "which rope_per_axis=False replaces with one shared ladder"
             )
         if rope_axis_bands is not None:
             if not rope_per_axis:
@@ -210,16 +222,35 @@ class DeepIceRope(GNN):
         pairs_per_axis = head_size // 2 // 4
         if rope_per_axis:
             axis_bands = rope_axis_bands or HEXAGON_AXIS_BANDS
-            omega = torch.cat(
+            n_heads = hidden_dim // head_size
+            n_ladder = pairs_per_axis * (n_heads if rope_per_head else 1)
+            ladders = torch.stack(
                 [
                     torch.exp(
                         torch.linspace(
-                            math.log(lo), math.log(hi), pairs_per_axis
+                            math.log(lo),
+                            math.log(hi),
+                            n_ladder,
+                            dtype=(
+                                torch.float64
+                                if rope_per_head
+                                else torch.float32
+                            ),
                         )
                     )
                     for lo, hi in axis_bands
                 ]
             )
+            if rope_per_head:
+                # `[heads, 4 * pairs_per_axis]`, each head's row laid out
+                # axis by axis like the shared ladder.
+                omega = (
+                    ladders.view(4, pairs_per_axis, n_heads)
+                    .permute(2, 0, 1)
+                    .reshape(n_heads, -1)
+                )
+            else:
+                omega = ladders.flatten()
         else:
             decay = torch.arange(pairs_per_axis, dtype=torch.float32) / max(
                 pairs_per_axis - 1, 1
@@ -314,10 +345,23 @@ class DeepIceRope(GNN):
         `coordinate_features` names; by default 0-2 and 4, the NuBench
         order, whose column 3 is charge.
         """
-        coords = features[:, self._coordinate_columns].float()
-        angles = coords[:, self.rope_axis] * self.rope_omega
+        coords = features[:, self._coordinate_columns]
+        if self.rope_omega.ndim == 1:
+            angles = coords.float()[:, self.rope_axis] * self.rope_omega
+            return self._rope_table(
+                torch.cos(angles), torch.sin(angles), batch_idx, batch_size
+            )
+        # One table per head, `[pulses, heads, head_size // 2]`. The phase
+        # is accumulated in float64, as in the nD class: a band spread over
+        # the heads reaches frequencies that put absolute phases at 1e4
+        # radians, where float32 rounding approaches the phase difference
+        # of two close pulses.
+        angles = coords.double()[:, None, self.rope_axis] * self.rope_omega
         return self._rope_table(
-            torch.cos(angles), torch.sin(angles), batch_idx, batch_size
+            torch.cos(angles).to(features.dtype),
+            torch.sin(angles).to(features.dtype),
+            batch_idx,
+            batch_size,
         )
 
     def forward(self, data: Data) -> Tensor:
