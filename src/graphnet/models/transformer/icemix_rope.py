@@ -63,6 +63,7 @@ class DeepIceRope(GNN):
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
         rope_axis_bands: Optional[Sequence[Tuple[float, float]]] = None,
+        qk_norm: bool = False,
     ):
         """Construct `DeepIceRope`.
 
@@ -115,6 +116,9 @@ class DeepIceRope(GNN):
                 coordinate's pulse-pair differences vary, so it depends on
                 the detector and its normalisation. Defaults to the bands
                 measured on the hexagon detector. Only with `rope_per_axis`.
+            qk_norm: Per-head RMSNorm on queries and keys before they are
+                rotated, bounding the growth of the attention logits. The
+                rotation leaves the normalised length unchanged.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -170,6 +174,7 @@ class DeepIceRope(GNN):
                     num_heads=hidden_dim // head_size,
                     mlp_ratio=mlp_ratio,
                     init_values=1,
+                    qk_norm=qk_norm,
                 )
                 for _ in range(depth_rel)
             ]
@@ -183,6 +188,7 @@ class DeepIceRope(GNN):
                     mlp_ratio=mlp_ratio,
                     drop_path=0.0 * (i / max(depth - 1, 1)),
                     init_values=1,
+                    qk_norm=qk_norm,
                 )
                 for i in range(depth)
             ]

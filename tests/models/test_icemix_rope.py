@@ -2,10 +2,20 @@
 
 from typing import Any, Dict, List
 
+import pytest
 import torch
 from torch_geometric.data import Batch, Data
 
-from graphnet.models.transformer import DeepIceRope
+from graphnet.models.transformer import DeepIceRope, DeepIceRopeND
+
+# A head size both constructions accept: divisible by 8 and by 10.
+BOTH = pytest.mark.parametrize(
+    "model_class, sizes",
+    [
+        (DeepIceRope, dict(hidden_dim=64, head_size=16)),
+        (DeepIceRopeND, dict(hidden_dim=80, head_size=40)),
+    ],
+)
 
 HIDDEN_DIM = 64
 
@@ -54,3 +64,22 @@ def test_depth_rel_only_changes_the_state_dict_layout() -> None:
     batch = _batch()
     with torch.no_grad():
         torch.testing.assert_close(joined(batch), split(batch))
+
+
+@BOTH
+def test_qk_norm_reaches_every_block(
+    model_class: type, sizes: Dict[str, int]
+) -> None:
+    """Unset, no block normalises; set, each one does."""
+    plain = _rope(model_class, **sizes)
+    assert all(block.q_norm is None for block in plain.blocks)
+
+    normed = _rope(model_class, qk_norm=True, **sizes)
+    assert all(
+        block.q_norm is not None and block.k_norm is not None
+        for block in normed.blocks
+    )
+    with torch.no_grad():
+        out = normed(_batch())
+    assert out.shape == (3, sizes["hidden_dim"])
+    assert torch.isfinite(out).all()

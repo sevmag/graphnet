@@ -123,6 +123,7 @@ class DeepIceRopeND(DeepIceRope):
         fourier_mlp_dim: Optional[int] = None,
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
+        qk_norm: bool = False,
     ):
         """Construct `DeepIceRopeND`.
 
@@ -158,6 +159,7 @@ class DeepIceRopeND(DeepIceRope):
             fourier_kwargs: See `DeepIceRope`.
             coordinate_features: See `DeepIceRope`. `axis_scales` follow the
                 same (x, y, z, t) order.
+            qk_norm: See `DeepIceRope`.
         """
         super().__init__(
             hidden_dim=hidden_dim,
@@ -175,6 +177,7 @@ class DeepIceRopeND(DeepIceRope):
             fourier_mlp_dim=fourier_mlp_dim,
             fourier_kwargs=fourier_kwargs,
             coordinate_features=coordinate_features,
+            qk_norm=qk_norm,
         )
         n_dims = 4
         n_heads = hidden_dim // head_size
