@@ -3,13 +3,17 @@
 https://github.com/ChenLi2049/ISeeCube/
 """
 
+from typing import Any, Dict, List, Optional
+
 import torch
 import torch.nn as nn
 
-from graphnet.models.components.embedding import (
-    FourierEncoderEPJC,
-)
 from graphnet.models.gnn.gnn import GNN
+from graphnet.models.transformer.inputs import (
+    FourierSchema,
+    build_fourier_tokenizer,
+    embed_pulses,
+)
 from graphnet.models.utils import array_to_sequence
 
 from torchscale.architecture.config import EncoderConfig
@@ -34,6 +38,9 @@ class ISeeCube(GNN):
         num_register_tokens: int = 3,
         scaled_emb: bool = False,
         n_features: int = 6,
+        fourier_schema: Optional[FourierSchema] = None,
+        input_feature_names: Optional[List[str]] = None,
+        fourier_kwargs: Optional[Dict[str, Any]] = None,
     ):
         """Construct `ISeeCube`.
 
@@ -42,21 +49,35 @@ class ISeeCube(GNN):
             seq_length: The number of pulses in a neutrino event.
             num_layers: The depth of the transformer.
             num_heads: The number of the attention heads.
-            mlp_dim: The mlp dimension of FourierEncoderEPJC and Transformer.
+            mlp_dim: The mlp dimension of the Fourier projection and the
+                Transformer.
             rel_pos_buckets: Relative position buckets for relative position
                 bias.
             max_rel_pos: Maximum relative position for relative position bias.
             num_register_tokens: The number of register tokens.
             scaled_emb: Whether to scale the sinusoidal positional embeddings.
-            n_features: The number of features in the input data.
+            n_features: The number of features in the input data, read by
+                `FourierEncoderEPJC`.
+            fourier_schema: `{feature name: multiplier}` or
+                `{feature name: (multiplier, n_freq)}` for the columns to
+                embed, resolved against `input_feature_names`. Unset, the
+                encoder is `FourierEncoderEPJC` with its fixed layout.
+            input_feature_names: Input column names, in order. Required with
+                `fourier_schema`.
+            fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
+                `add_sequence_length` and `phase_dtype`. Only with
+                `fourier_schema`.
         """
         super().__init__(seq_length, hidden_dim)
-        self.fourier_ext = FourierEncoderEPJC(
+        self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
             seq_length=seq_length,
-            mlp_dim=mlp_dim,
             output_dim=hidden_dim,
             scaled=scaled_emb,
             n_features=n_features,
+            fourier_schema=fourier_schema,
+            input_feature_names=input_feature_names,
+            mlp_dim=mlp_dim,
+            fourier_kwargs=fourier_kwargs,
         )
         self.pos_embedding = nn.Parameter(
             torch.empty(1, seq_length, hidden_dim).normal_(std=0.02),
@@ -89,7 +110,7 @@ class ISeeCube(GNN):
         x, _, seq_length = array_to_sequence(
             data.x, data.batch, padding_value=0
         )
-        x = self.fourier_ext(x, seq_length)
+        x = embed_pulses(self.fourier_ext, self.fourier_mlp, x, seq_length)
         batch_size = x.shape[0]
 
         x += self.pos_embedding
