@@ -15,7 +15,7 @@ import math
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from graphnet.models.components.attention_blocks import Block
 from graphnet.models.gnn.gnn import GNN
@@ -29,6 +29,17 @@ from graphnet.models.utils import array_to_sequence
 
 from torch_geometric.data import Data
 from torch import Tensor
+
+# One geometric frequency band per coordinate (x, y, z, t), spanning the range
+# where that axis's measured pulse-pair coordinate differences actually vary
+# on the hexagon detector. A single shared ladder wastes most frequencies
+# out-of-band per axis; matched bands place every frequency where it resolves.
+HEXAGON_AXIS_BANDS = (
+    (0.50, 8.23),
+    (0.47, 16.12),
+    (5.84, 193.57),
+    (1237.0, 68921.0),
+)
 
 
 class DeepIceRope(GNN):
@@ -51,6 +62,7 @@ class DeepIceRope(GNN):
         fourier_mlp_dim: Optional[int] = None,
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
+        rope_axis_bands: Optional[Sequence[Tuple[float, float]]] = None,
     ):
         """Construct `DeepIceRope`.
 
@@ -72,9 +84,8 @@ class DeepIceRope(GNN):
                 then reads the coordinates from columns 0-2 and time from
                 column 4.
             rope_per_axis: Use a separate geometric RoPE frequency band per
-                coordinate (x, y, z, t), matched to the measured range of
-                pulse-pair coordinate differences on the hexagon detector,
-                instead of one shared ladder repeated across axes.
+                coordinate (x, y, z, t) instead of one shared ladder repeated
+                across axes. The bands are `rope_axis_bands`.
             compile_blocks: Wrap the transformer block stack in
                 `torch.compile`. The jagged path issues many small ops per
                 step; compiling the whole stack as one graph is what turns
@@ -96,6 +107,12 @@ class DeepIceRope(GNN):
                 that order, resolved against `input_feature_names`: the
                 columns the rotation reads. Unset, they are columns 0-2 and
                 4.
+            rope_axis_bands: Lowest and highest rotation frequency for each
+                of x, y, z and t, in radians per unit of the normalised
+                coordinate. A band should span the range over which that
+                coordinate's pulse-pair differences vary, so it depends on
+                the detector and its normalisation. Defaults to the bands
+                measured on the hexagon detector. Only with `rope_per_axis`.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -110,6 +127,20 @@ class DeepIceRope(GNN):
                 "(x, y, z, charge, t) and reads the time coordinate "
                 f"from column 4; got n_features={n_features}."
             )
+        if rope_axis_bands is not None:
+            if not rope_per_axis:
+                raise ValueError(
+                    "rope_axis_bands set the per-axis bands, which "
+                    "rope_per_axis=False replaces with one shared ladder"
+                )
+            if len(rope_axis_bands) != 4 or any(
+                not 0 < lo <= hi for lo, hi in rope_axis_bands
+            ):
+                raise ValueError(
+                    "rope_axis_bands needs a (lowest, highest) pair of "
+                    "positive frequencies for each of x, y, z and t, got "
+                    f"{list(rope_axis_bands)}"
+                )
         self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
             seq_length=seq_length,
             output_dim=hidden_dim,
@@ -157,17 +188,7 @@ class DeepIceRope(GNN):
 
         pairs_per_axis = head_size // 2 // 4
         if rope_per_axis:
-            # One geometric frequency band per coordinate (x, y, z, t),
-            # spanning the range where that axis's measured pulse-pair
-            # coordinate differences actually vary on the hexagon detector.
-            # A single shared ladder wastes most frequencies out-of-band per
-            # axis; matched bands place every frequency where it resolves.
-            axis_bands = [
-                (0.50, 8.23),
-                (0.47, 16.12),
-                (5.84, 193.57),
-                (1237.0, 68921.0),
-            ]
+            axis_bands = rope_axis_bands or HEXAGON_AXIS_BANDS
             omega = torch.cat(
                 [
                     torch.exp(
