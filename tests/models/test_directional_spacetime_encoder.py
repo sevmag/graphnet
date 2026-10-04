@@ -15,7 +15,7 @@ def _steps() -> torch.Tensor:
 
 
 PAIR_FEATURES = pytest.mark.parametrize(
-    "pair_features", ["polar", "cartesian"]
+    "pair_features", ["polar", "cartesian", "differences"]
 )
 
 
@@ -34,6 +34,14 @@ def test_cartesian_embeds_six_scalars() -> None:
         seq_length=8, pair_features="cartesian"
     )
     assert encoder.mlp[0].in_features == 6 * 8
+
+
+def test_differences_embed_four_scalars() -> None:
+    """Three components and the time difference, nothing derived."""
+    encoder = DirectionalSpacetimeEncoder(
+        seq_length=8, pair_features="differences"
+    )
+    assert encoder.mlp[0].in_features == 4 * 8
 
 
 def test_unknown_pair_features() -> None:
