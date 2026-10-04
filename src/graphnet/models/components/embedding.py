@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.functional import Tensor
 
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from pytorch_lightning import LightningModule
 from torch_geometric.utils import add_self_loops
@@ -597,6 +597,12 @@ class DirectionalSpacetimeEncoder(LightningModule):
     which hands the MLP separations along the detector axes directly, such as
     the vertical one along a string.
 
+    A third form, `"differences"`, leaves the derived quantities out: it
+    embeds the three signed components and the signed time difference, and
+    neither the range nor the interval. Any combination of space and time is
+    then the MLP's to form, which makes it the additive counterpart of a
+    rotary encoding of the same four coordinates.
+
     Given the columns of each step's sensor pointing direction, the encoder
     also embeds the components of the difference of the two sensors'
     directions. They say how far and in which direction the two orientations
@@ -635,8 +641,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
         """Construct `DirectionalSpacetimeEncoder`.
 
         Args:
-            seq_length: Width of the sinusoidal embedding of each of the
-                range, the time difference and the interval.
+            seq_length: Width of the sinusoidal embedding of each scalar put
+                on the ladder.
             output_dim: Width of the per-pair output. Defaults to
                 `seq_length`.
             columns: Input columns holding `(x, y, z, t)`.
@@ -645,8 +651,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 normalisation in use. Each medium learns a multiplier on it.
             scale: Multiplier applied before the sinusoidal ladders, as in
                 `SpacetimeEncoder`.
-            clip: Bound on the range, the time difference and the interval
-                before embedding, or None to leave them unbounded.
+            clip: Bound on each scalar put on the ladder before embedding,
+                or None to leave them unbounded.
             n_freq: Span of the frequency ladders.
             n_direction_freq: Frequencies per component of the unit
                 direction. How a medium depends on direction is smooth, so a
@@ -656,18 +662,18 @@ class DirectionalSpacetimeEncoder(LightningModule):
             medium_dim: Width of the learnable code of each medium. Unused
                 with a single medium, where a constant modulation adds
                 nothing the MLP cannot absorb.
-            pair_features: How the separation vector is embedded, `"polar"`
-                or `"cartesian"`; see the class docstring.
+            pair_features: What is embedded of each pair, `"polar"`,
+                `"cartesian"` or `"differences"`; see the class docstring.
             direction_columns: Input columns holding each step's sensor
                 pointing direction as a unit vector, or None to leave the
                 sensors' orientation out. Each component of half the
                 difference of the two directions is embedded with the
                 ladder.
         """
-        if pair_features not in ("polar", "cartesian"):
+        if pair_features not in ("polar", "cartesian", "differences"):
             raise ValueError(
-                f"pair_features must be 'polar' or 'cartesian', got "
-                f"{pair_features!r}"
+                f"pair_features must be 'polar', 'cartesian' or "
+                f"'differences', got {pair_features!r}"
             )
         super().__init__()
         self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
@@ -680,8 +686,10 @@ class DirectionalSpacetimeEncoder(LightningModule):
         self.direction_columns = direction_columns
         if pair_features == "polar":
             in_dim = 3 * seq_length + 6 * n_direction_freq
-        else:
+        elif pair_features == "cartesian":
             in_dim = 6 * seq_length
+        else:
+            in_dim = 4 * seq_length
         if direction_columns is not None:
             in_dim += 3 * seq_length
 
@@ -703,28 +711,18 @@ class DirectionalSpacetimeEncoder(LightningModule):
             nn.Linear(hidden_dim, output_dim or seq_length),
         )
 
-    def forward(self, x: Tensor, medium: Optional[Tensor] = None) -> Tensor:
-        """Forward pass.
+    def _range_ladders(self, separation: Tensor, dt: Tensor) -> List[Tensor]:
+        """Embed range, time difference, interval and the separation vector.
 
         Args:
-            x: Padded steps, shape `[batch, length, features]`.
-            medium: Index of each event's medium, shape `[batch]`. Every
-                event is medium 0 if not given.
+            separation: Position differences, `[batch, length, length, 3]`.
+            dt: Speed-scaled time differences, `[batch, length, length]`.
 
         Returns:
-            Per-pair features, shape `[batch, length, length, output_dim]`.
+            The embeddings of the `"polar"` or `"cartesian"` form.
         """
-        if medium is None:
-            medium = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
-        xi, yi, zi, ti = self.columns
-        pos = x[:, :, [xi, yi, zi]]
-        time = x[:, :, ti]
-
-        speed = self.time_scale * torch.exp(self.log_speed(medium))
-        separation = pos[:, :, None] - pos[:, None, :]
         range_sq = separation.pow(2).sum(-1)
         distance = torch.sqrt(range_sq.clamp_min(self._EPS))
-        dt = speed.view(-1, 1, 1) * (time[:, :, None] - time[:, None, :])
         interval = range_sq - dt.pow(2)
         four_distance = torch.sign(interval) * torch.sqrt(
             interval.abs().clamp_min(self._EPS)
@@ -756,8 +754,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 * torch.arange(
                     1,
                     self.n_direction_freq + 1,
-                    device=x.device,
-                    dtype=x.dtype,
+                    device=separation.device,
+                    dtype=separation.dtype,
                 )
             )
             angles = direction.unsqueeze(-1) * direction_freq
@@ -765,6 +763,38 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 torch.sin(angles).flatten(-2),
                 torch.cos(angles).flatten(-2),
             ]
+        return ladders
+
+    def forward(self, x: Tensor, medium: Optional[Tensor] = None) -> Tensor:
+        """Forward pass.
+
+        Args:
+            x: Padded steps, shape `[batch, length, features]`.
+            medium: Index of each event's medium, shape `[batch]`. Every
+                event is medium 0 if not given.
+
+        Returns:
+            Per-pair features, shape `[batch, length, length, output_dim]`.
+        """
+        if medium is None:
+            medium = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+        xi, yi, zi, ti = self.columns
+        pos = x[:, :, [xi, yi, zi]]
+        time = x[:, :, ti]
+
+        speed = self.time_scale * torch.exp(self.log_speed(medium))
+        separation = pos[:, :, None] - pos[:, None, :]
+        dt = speed.view(-1, 1, 1) * (time[:, :, None] - time[:, None, :])
+        if self.pair_features == "differences":
+            if self.clip is not None:
+                separation = separation.clamp(-self.clip, self.clip)
+                dt = dt.clamp(-self.clip, self.clip)
+            ladders = [
+                self.sin_emb(self.scale * separation[..., k]) for k in range(3)
+            ]
+            ladders.append(self.sin_emb(self.scale * dt))
+        else:
+            ladders = self._range_ladders(separation, dt)
         if self.direction_columns is not None:
             pointing = x[:, :, list(self.direction_columns)]
             # Halved into [-1, 1], the range of a direction component.
