@@ -349,7 +349,8 @@ class FourierEncoder(LightningModule):
         """Apply positional encoding of `x`.
 
         Args:
-            x: `[B, K, D]`-dimensional sequence representation of an event.
+            x: Sequence representation of an event, either padded
+                `[B, K, D]` or a jagged `NestedTensor` `[B, j, D]`.
             seq_length: `[B]`-dimensional unpadded length of each sequence in
                 `x`, one entry per sequence rather than per step. Required
                 when `add_sequence_length` is True, in which case each step
@@ -357,25 +358,65 @@ class FourierEncoder(LightningModule):
                 length.
 
         Returns:
-            Embedded `[B, K, J]`-dimensional sequence.
+            Embedded sequence, `[B, K, J]` or jagged `[B, j, J]` like `x`.
         """
+        if x.is_nested:
+            return self._forward_jagged(x, seq_length)
         embeddings = [
             self.sin_feature[self._span_index[span]](scale * x[:, :, col])
             for col, (scale, span) in self.schema.items()
         ]
 
         if self._add_sequence_length:
-            if seq_length is None:
-                raise ValueError(
-                    "Must pass `seq_length` when `add_sequence_length` is "
-                    "True."
-                )
-            length = torch.log10(seq_length.to(dtype=x.dtype))
             embeddings.append(
-                self.sin_length(length).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self._embed_length(seq_length, x.dtype)
+                .unsqueeze(1)
+                .expand(-1, x.shape[1], -1)
             )
 
         return torch.cat(embeddings, -1)
+
+    def _embed_length(
+        self, seq_length: Optional[Tensor], dtype: torch.dtype
+    ) -> Tensor:
+        """Embed the unpadded length of each sequence, `[B, J/2]`."""
+        if seq_length is None:
+            raise ValueError(
+                "Must pass `seq_length` when `add_sequence_length` is True."
+            )
+        return self.sin_length(torch.log10(seq_length.to(dtype=dtype)))
+
+    def _forward_jagged(
+        self, x: Tensor, seq_length: Optional[Tensor]
+    ) -> Tensor:
+        """Encode a jagged `NestedTensor` on its dense values buffer.
+
+        The encoding is per step, so it runs on the flat `[total_steps, D]`
+        buffer and is rewrapped with the input's offsets: no compute on
+        padding, and dense ops cover what jagged eager kernels do not
+        (notably under `torch.inference_mode`).
+        """
+        v = x.values()
+        embeddings = [
+            self.sin_feature[self._span_index[span]](scale * v[:, col])
+            for col, (scale, span) in self.schema.items()
+        ]
+
+        if self._add_sequence_length:
+            length = self._embed_length(seq_length, v.dtype)
+            assert seq_length is not None
+            # Each step takes its own sequence's length embedding.
+            batch_idx = torch.repeat_interleave(
+                torch.arange(seq_length.numel(), device=v.device), seq_length
+            )
+            embeddings.append(length[batch_idx])
+
+        return torch.nested.nested_tensor_from_jagged(
+            torch.cat(embeddings, -1),
+            x.offsets(),
+            min_seqlen=x._get_min_seqlen(),
+            max_seqlen=x._get_max_seqlen(),
+        )
 
 
 def signed_four_distance(
