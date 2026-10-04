@@ -111,6 +111,24 @@ def test_scale_ladder_and_plane_budget() -> None:
     assert model.rope_scales[0].item() == pytest.approx(1.0)
 
 
+def test_per_head_scales_share_one_ladder() -> None:
+    """Spread over the heads, the scales interleave into one ladder."""
+    model = DeepIceRopeND(
+        hidden_dim=96,
+        head_size=48,
+        depth=2,
+        rope_base=100.0,
+        rope_per_head=True,
+    )
+    # 2 heads x 4 scales each.
+    assert model.rope_scales.shape == (2, 4)
+    ladder = torch.tensor(
+        [100.0 ** (-j / 8) for j in range(8)], dtype=torch.float64
+    )
+    torch.testing.assert_close(model.rope_scales.T.flatten(), ladder)
+    assert model.rope_planes == 20
+
+
 def test_angles_identity_on_cls_and_unused_planes() -> None:
     """Cls slots and planes beyond the budget carry no rotation."""
     model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
@@ -131,7 +149,10 @@ def test_angles_identity_on_cls_and_unused_planes() -> None:
     )
 
 
-def test_attention_logit_depends_only_on_displacement() -> None:
+@pytest.mark.parametrize("rope_per_head", [False, True])
+def test_attention_logit_depends_only_on_displacement(
+    rope_per_head: bool,
+) -> None:
     """The RoPE property: translating an event leaves q.k unchanged.
 
     Rotating q at position x_i and k at x_j by the nD-RoPE phases makes
@@ -139,7 +160,9 @@ def test_attention_logit_depends_only_on_displacement() -> None:
     the encoding relative.
     """
     torch.manual_seed(0)
-    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
+    model = DeepIceRopeND(
+        hidden_dim=96, head_size=48, depth=2, rope_per_head=rope_per_head
+    )
     heads, head_dim = 2, 48
     q = torch.randn(2, heads * head_dim, dtype=torch.float32)
     k = torch.randn(2, heads * head_dim, dtype=torch.float32)

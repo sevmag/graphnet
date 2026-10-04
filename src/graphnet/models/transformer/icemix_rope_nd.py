@@ -125,6 +125,7 @@ class DeepIceRopeND(DeepIceRope):
         coordinate_features: Optional[Sequence[str]] = None,
         qk_norm: bool = False,
         pooling: str = "cls",
+        rope_per_head: bool = False,
     ):
         """Construct `DeepIceRopeND`.
 
@@ -162,6 +163,10 @@ class DeepIceRopeND(DeepIceRope):
                 same (x, y, z, t) order.
             qk_norm: See `DeepIceRope`.
             pooling: See `DeepIceRope`.
+            rope_per_head: Spread the scale ladder over the heads: it gets
+                `n_heads` times as many scales between 1 and `1 / rope_base`
+                and head `h` takes every `n_heads`-th one from the `h`-th
+                on, instead of all heads repeating the same scales.
         """
         super().__init__(
             hidden_dim=hidden_dim,
@@ -207,10 +212,13 @@ class DeepIceRopeND(DeepIceRope):
         # Per head: rotate the whole simplex, keeping its geometry but
         # removing any shared preferred direction across heads.
         wave = torch.einsum("md,hed->hme", directions, rotations)
+        n_ladder = n_scales * (n_heads if rope_per_head else 1)
         scales = torch.tensor(
-            [rope_base ** (-s / n_scales) for s in range(n_scales)],
+            [rope_base ** (-s / n_ladder) for s in range(n_ladder)],
             dtype=torch.float64,
         )
+        if rope_per_head:
+            scales = scales.view(n_scales, n_heads).T.contiguous()
 
         # Persistent: the rotations are sampled, so a checkpoint has to
         # carry them to reproduce its own model.
@@ -248,7 +256,11 @@ class DeepIceRopeND(DeepIceRope):
         )
         # <omega, x> for every head and wave vector, then the scale ladder.
         projected = torch.einsum("pd,hmd->phm", coords, self.rope_wave)
-        angles = (projected.unsqueeze(-1) * self.rope_scales).flatten(-2)
+        scales = self.rope_scales
+        if scales.ndim == 2:
+            # One row of scales per head, against `[pulses, heads, waves]`.
+            scales = scales.unsqueeze(1)
+        angles = (projected.unsqueeze(-1) * scales).flatten(-2)
 
         n_pulses, n_heads, _ = angles.shape
         shape = (n_pulses, n_heads, self.rope_half)
