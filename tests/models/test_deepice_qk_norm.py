@@ -50,7 +50,16 @@ def test_rel_qk_norm_adds_parameters_to_the_relative_blocks_only() -> None:
     }
 
 
-def test_flash_attention_rejects_rel_qk_norm() -> None:
-    """The fused kernel has no place to normalise."""
-    with pytest.raises(ValueError, match="rel_qk_norm"):
-        DeepIce(rel_attention="flash", rel_qk_norm=True)
+def test_flash_attention_takes_rel_qk_norm() -> None:
+    """The fused path normalises ahead of the kernel, so the two combine."""
+    pytest.importorskip("flash_spacetime")
+    model = DeepIce(
+        hidden_dim=64,
+        seq_length=32,
+        depth=1,
+        head_size=16,
+        depth_rel=2,
+        rel_attention="flash",
+        rel_qk_norm=True,
+    )
+    assert all(block.attn.q_norm is not None for block in model.sandwich)
