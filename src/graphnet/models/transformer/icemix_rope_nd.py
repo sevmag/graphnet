@@ -109,9 +109,9 @@ class DeepIceRopeND(DeepIceRope):
         hidden_dim: int = 384,
         mlp_ratio: int = 4,
         seq_length: int = 192,
-        depth: int = 12,
+        depth: int = 16,
         head_size: int = 32,
-        depth_rel: int = 4,
+        depth_rel: int = 0,
         scaled_emb: bool = False,
         n_features: int = 5,
         compile_blocks: bool = False,
@@ -123,6 +123,9 @@ class DeepIceRopeND(DeepIceRope):
         fourier_mlp_dim: Optional[int] = None,
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
+        qk_norm: bool = False,
+        pooling: str = "cls",
+        rope_per_head: bool = False,
     ):
         """Construct `DeepIceRopeND`.
 
@@ -130,13 +133,12 @@ class DeepIceRopeND(DeepIceRope):
             hidden_dim: The latent feature dimension.
             mlp_ratio: Mlp expansion ratio of FourierEncoder and Transformer.
             seq_length: The base feature dimension.
-            depth: The depth of the transformer.
+            depth: The number of transformer blocks.
             head_size: The size of the attention heads. Divisibility by
                 `2 * (n_dims + 1)` = 10 uses every rotation plane; at other
                 sizes the remainder is left unrotated (see the module
                 docstring).
-            depth_rel: The number of blocks standing in for `DeepIce`'s
-                relative-attention sandwich.
+            depth_rel: See `DeepIceRope`.
             scaled_emb: Whether to scale the sinusoidal positional
                 embeddings.
             n_features: The number of features in the input data; see
@@ -159,6 +161,12 @@ class DeepIceRopeND(DeepIceRope):
             fourier_kwargs: See `DeepIceRope`.
             coordinate_features: See `DeepIceRope`. `axis_scales` follow the
                 same (x, y, z, t) order.
+            qk_norm: See `DeepIceRope`.
+            pooling: See `DeepIceRope`.
+            rope_per_head: Spread the scale ladder over the heads: it gets
+                `n_heads` times as many scales between 1 and `1 / rope_base`
+                and head `h` takes every `n_heads`-th one from the `h`-th
+                on, instead of all heads repeating the same scales.
         """
         super().__init__(
             hidden_dim=hidden_dim,
@@ -176,6 +184,8 @@ class DeepIceRopeND(DeepIceRope):
             fourier_mlp_dim=fourier_mlp_dim,
             fourier_kwargs=fourier_kwargs,
             coordinate_features=coordinate_features,
+            qk_norm=qk_norm,
+            pooling=pooling,
         )
         n_dims = 4
         n_heads = hidden_dim // head_size
@@ -202,10 +212,13 @@ class DeepIceRopeND(DeepIceRope):
         # Per head: rotate the whole simplex, keeping its geometry but
         # removing any shared preferred direction across heads.
         wave = torch.einsum("md,hed->hme", directions, rotations)
+        n_ladder = n_scales * (n_heads if rope_per_head else 1)
         scales = torch.tensor(
-            [rope_base ** (-s / n_scales) for s in range(n_scales)],
+            [rope_base ** (-s / n_ladder) for s in range(n_ladder)],
             dtype=torch.float64,
         )
+        if rope_per_head:
+            scales = scales.view(n_scales, n_heads).T.contiguous()
 
         # Persistent: the rotations are sampled, so a checkpoint has to
         # carry them to reproduce its own model.
@@ -228,9 +241,9 @@ class DeepIceRopeND(DeepIceRope):
         Coordinates are (x, y, z, t), read from the columns
         `coordinate_features` names; by default 0-2 and 4, the NuBench
         order, whose column 3 is charge. Returns
-        `[tokens, heads, head_size // 2]` cosine/sine pairs; the cls slot of
-        every event and any rotation plane beyond `rope_planes` keep
-        cos = 1 / sin = 0, the identity rotation.
+        `[tokens, heads, head_size // 2]` cosine/sine pairs; any rotation
+        plane beyond `rope_planes` keeps cos = 1 / sin = 0, the identity
+        rotation.
         """
         # The phase is accumulated in float64 and only the bounded cosine
         # and sine are cast down. Detector time carries a large axis scale,
@@ -243,18 +256,16 @@ class DeepIceRopeND(DeepIceRope):
         )
         # <omega, x> for every head and wave vector, then the scale ladder.
         projected = torch.einsum("pd,hmd->phm", coords, self.rope_wave)
-        angles = (projected.unsqueeze(-1) * self.rope_scales).flatten(-2)
+        scales = self.rope_scales
+        if scales.ndim == 2:
+            # One row of scales per head, against `[pulses, heads, waves]`.
+            scales = scales.unsqueeze(1)
+        angles = (projected.unsqueeze(-1) * scales).flatten(-2)
 
         n_pulses, n_heads, _ = angles.shape
-        planes = self.rope_half
-        shape = (n_pulses + batch_size, n_heads, planes)
-        rope_cos = features.new_ones(shape)
-        rope_sin = features.new_zeros(shape)
-        pos = torch.arange(n_pulses, device=angles.device) + batch_idx + 1
-        rope_cos[pos, :, : self.rope_planes] = torch.cos(angles).to(
-            features.dtype
-        )
-        rope_sin[pos, :, : self.rope_planes] = torch.sin(angles).to(
-            features.dtype
-        )
-        return rope_cos, rope_sin
+        shape = (n_pulses, n_heads, self.rope_half)
+        cos = features.new_ones(shape)
+        sin = features.new_zeros(shape)
+        cos[:, :, : self.rope_planes] = torch.cos(angles).to(features.dtype)
+        sin[:, :, : self.rope_planes] = torch.sin(angles).to(features.dtype)
+        return self._rope_table(cos, sin, batch_idx, batch_size)

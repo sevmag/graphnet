@@ -93,7 +93,7 @@ def test_rotations_are_proper_and_preserve_geometry() -> None:
 
 def test_per_head_wave_vectors_differ() -> None:
     """Heads must not share a preferred direction (the point of step 2)."""
-    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
+    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
     wave = model.rope_wave
     assert wave.shape == (2, N_DIMS + 1, N_DIMS)
     assert not torch.allclose(wave[0], wave[1], atol=1e-4)
@@ -101,7 +101,7 @@ def test_per_head_wave_vectors_differ() -> None:
 
 def test_scale_ladder_and_plane_budget() -> None:
     """S = floor(half / (n+1)) scales; leftover planes stay unrotated."""
-    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
+    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
     # head_size 48 -> 24 planes -> 4 scales x 5 wave vectors = 20 used.
     assert model.rope_scales.numel() == 4
     assert model.rope_planes == 20
@@ -111,9 +111,27 @@ def test_scale_ladder_and_plane_budget() -> None:
     assert model.rope_scales[0].item() == pytest.approx(1.0)
 
 
+def test_per_head_scales_share_one_ladder() -> None:
+    """Spread over the heads, the scales interleave into one ladder."""
+    model = DeepIceRopeND(
+        hidden_dim=96,
+        head_size=48,
+        depth=2,
+        rope_base=100.0,
+        rope_per_head=True,
+    )
+    # 2 heads x 4 scales each.
+    assert model.rope_scales.shape == (2, 4)
+    ladder = torch.tensor(
+        [100.0 ** (-j / 8) for j in range(8)], dtype=torch.float64
+    )
+    torch.testing.assert_close(model.rope_scales.T.flatten(), ladder)
+    assert model.rope_planes == 20
+
+
 def test_angles_identity_on_cls_and_unused_planes() -> None:
     """Cls slots and planes beyond the budget carry no rotation."""
-    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
+    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
     data = _make_batch([3, 5], seed=4)
     cos, sin = model._rope_angles(data.x, data.batch, 2)
     assert cos.shape == (10, 2, 24)
@@ -131,7 +149,10 @@ def test_angles_identity_on_cls_and_unused_planes() -> None:
     )
 
 
-def test_attention_logit_depends_only_on_displacement() -> None:
+@pytest.mark.parametrize("rope_per_head", [False, True])
+def test_attention_logit_depends_only_on_displacement(
+    rope_per_head: bool,
+) -> None:
     """The RoPE property: translating an event leaves q.k unchanged.
 
     Rotating q at position x_i and k at x_j by the nD-RoPE phases makes
@@ -139,7 +160,9 @@ def test_attention_logit_depends_only_on_displacement() -> None:
     the encoding relative.
     """
     torch.manual_seed(0)
-    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
+    model = DeepIceRopeND(
+        hidden_dim=96, head_size=48, depth=2, rope_per_head=rope_per_head
+    )
     heads, head_dim = 2, 48
     q = torch.randn(2, heads * head_dim, dtype=torch.float32)
     k = torch.randn(2, heads * head_dim, dtype=torch.float32)
@@ -169,7 +192,7 @@ def test_attention_logit_depends_only_on_displacement() -> None:
 def test_absolute_position_still_matters_within_a_pair() -> None:
     """A guard against the trivial way to pass the previous test."""
     torch.manual_seed(1)
-    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
+    model = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
     heads, head_dim = 2, 48
     q = torch.randn(2, heads * head_dim)
     k = torch.randn(2, heads * head_dim)
@@ -190,12 +213,10 @@ def test_absolute_position_still_matters_within_a_pair() -> None:
 
 def test_construction_is_reproducible_and_checkpointable() -> None:
     """Same seed -> same wave vectors; state dict carries them."""
-    a = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
-    b = DeepIceRopeND(hidden_dim=96, head_size=48, depth=1, depth_rel=1)
+    a = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
+    b = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2)
     torch.testing.assert_close(a.rope_wave, b.rope_wave, atol=0, rtol=0)
-    c = DeepIceRopeND(
-        hidden_dim=96, head_size=48, depth=1, depth_rel=1, rope_seed=7
-    )
+    c = DeepIceRopeND(hidden_dim=96, head_size=48, depth=2, rope_seed=7)
     assert not torch.allclose(a.rope_wave, c.rope_wave, atol=1e-4)
     assert "rope_wave" in a.state_dict()
     c.load_state_dict(a.state_dict())
@@ -204,9 +225,7 @@ def test_construction_is_reproducible_and_checkpointable() -> None:
 
 def test_forward_runs_and_is_finite() -> None:
     """End-to-end forward on a mixed-length batch."""
-    model = DeepIceRopeND(
-        hidden_dim=96, seq_length=64, depth=2, head_size=48, depth_rel=2
-    )
+    model = DeepIceRopeND(hidden_dim=96, seq_length=64, depth=4, head_size=48)
     data = _make_batch([9, 1, 17], seed=8)
     out = model(data)
     assert out.shape == (3, 96)
@@ -216,4 +235,4 @@ def test_forward_runs_and_is_finite() -> None:
 def test_rejects_too_small_head_size() -> None:
     """A head with fewer planes than wave vectors cannot host the simplex."""
     with pytest.raises(ValueError, match="wave vectors"):
-        DeepIceRopeND(hidden_dim=16, head_size=8, depth=1, depth_rel=1)
+        DeepIceRopeND(hidden_dim=16, head_size=8, depth=2)

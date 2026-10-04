@@ -114,6 +114,7 @@ class Attention_rel(LightningModule):
         use_attn_bias: bool = True,
         use_activation_bias: bool = True,
         alibi: bool = False,
+        qk_norm: bool = False,
     ):
         """Construct 'Attention_rel'.
 
@@ -143,6 +144,10 @@ class Attention_rel(LightningModule):
                 content, which is what lets it be recomputed inside a fused
                 attention kernel rather than materialised. Implies no
                 activation bias -- there is no per-pair vector to add.
+            qk_norm: Apply a per-head RMSNorm to queries and keys before
+                the scale, bounding the attention logits as in `Block`. The
+                relative bias is contracted against the normalised query, so
+                it competes with a content term of fixed size.
         """
         if input_dim <= 0 or num_heads <= 0:
             raise ValueError(
@@ -166,6 +171,11 @@ class Attention_rel(LightningModule):
         head_dim = attn_head_dim or input_dim // num_heads
         all_head_dim = head_dim * self.num_heads
         self.scale = qk_scale or head_dim**-0.5
+        if qk_norm:
+            self.q_norm: Optional[nn.Module] = nn.RMSNorm(head_dim)
+            self.k_norm: Optional[nn.Module] = nn.RMSNorm(head_dim)
+        else:
+            self.q_norm = self.k_norm = None
 
         self.proj_q = nn.Linear(input_dim, all_head_dim, bias=False)
         self.proj_k = nn.Linear(input_dim, all_head_dim, bias=False)
@@ -205,6 +215,9 @@ class Attention_rel(LightningModule):
             0, 2, 1, 3
         )
 
+        if self.q_norm is not None and self.k_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
         q = q * self.scale
         attn = q @ k.transpose(-2, -1)
         if rel_pos_bias is not None and self.use_attn_bias:
@@ -292,9 +305,13 @@ class Attention_rel(LightningModule):
                 .permute(0, 2, 1, 3)
             )
 
-        q = to_heads(x, self.proj_q.weight, self.q_bias) * self.scale
+        q = to_heads(x, self.proj_q.weight, self.q_bias)
         k = to_heads(x, self.proj_k.weight, None)
         v = to_heads(x, self.proj_v.weight, self.v_bias)
+        if self.q_norm is not None and self.k_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        q = q * self.scale
 
         pair_bias = None
         if key_padding_mask is not None:
@@ -375,6 +392,7 @@ class Block_rel(LightningModule):
         use_attn_bias: bool = True,
         use_activation_bias: bool = True,
         alibi: bool = False,
+        qk_norm: bool = False,
     ):
         """Construct 'Block_rel'.
 
@@ -405,6 +423,8 @@ class Block_rel(LightningModule):
             alibi: Read `rel_pos_bias` as a scalar distance scaled by a
                 learned per-head slope rather than as a per-pair feature
                 contracted against the query. See `Attention_rel`.
+            qk_norm: Apply a per-head RMSNorm to queries and keys in the
+                `Attention_rel` layer.
         """
         super().__init__()
         self.norm1 = norm_layer(input_dim)
@@ -418,6 +438,7 @@ class Block_rel(LightningModule):
             use_attn_bias=use_attn_bias,
             use_activation_bias=use_activation_bias,
             alibi=alibi,
+            qk_norm=qk_norm,
         )
         self.drop_path = (
             DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -554,6 +575,11 @@ class Block_rel(LightningModule):
             merge_heads,
         )
 
+        if self.attn.q_norm is not None:
+            raise NotImplementedError(
+                "qk_norm is not implemented for the fused spacetime kernel, "
+                "whose inputs are the unnormalised projections"
+            )
         xn = self.norm1(x)
         q, k, v = attention_rel_oracle_inputs(self.attn, xn)
         out = flash_spacetime_attention(

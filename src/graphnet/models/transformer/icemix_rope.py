@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from graphnet.models.components.attention_blocks import Block
 from graphnet.models.gnn.gnn import GNN
+from graphnet.models.transformer.icemix import DeepIce
 from graphnet.models.transformer.inputs import (
     FourierSchema,
     build_fourier_tokenizer,
@@ -50,9 +51,9 @@ class DeepIceRope(GNN):
         hidden_dim: int = 384,
         mlp_ratio: int = 4,
         seq_length: int = 192,
-        depth: int = 12,
+        depth: int = 16,
         head_size: int = 32,
-        depth_rel: int = 4,
+        depth_rel: int = 0,
         scaled_emb: bool = False,
         n_features: int = 5,
         rope_per_axis: bool = True,
@@ -63,6 +64,9 @@ class DeepIceRope(GNN):
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
         rope_axis_bands: Optional[Sequence[Tuple[float, float]]] = None,
+        qk_norm: bool = False,
+        pooling: str = "cls",
+        rope_per_head: bool = False,
     ):
         """Construct `DeepIceRope`.
 
@@ -71,12 +75,14 @@ class DeepIceRope(GNN):
             mlp_ratio: Mlp expansion ratio of FourierEncoderEPJC and
                 Transformer.
             seq_length: The base feature dimension.
-            depth: The depth of the transformer.
+            depth: The number of transformer blocks. Every block rotates.
             head_size: The size of the attention heads. Must be divisible
                 by 8 (2D rotation pairs split over 4 coordinates).
-            depth_rel: The number of blocks standing in for `DeepIce`'s
-                relative-attention sandwich, keeping the total depth at
-                `depth_rel + depth`.
+            depth_rel: Further blocks, run ahead of the `depth` ones and
+                held in a separate module list. They are the same blocks;
+                the split only reproduces the state-dict layout of
+                `DeepIce`, whose leading blocks are of another kind, for
+                checkpoints and callers built on that layout.
             scaled_emb: Whether to scale the sinusoidal positional embeddings.
             n_features: The number of features in the input data, read by
                 `FourierEncoderEPJC`. Without `coordinate_features` at least
@@ -113,6 +119,21 @@ class DeepIceRope(GNN):
                 coordinate's pulse-pair differences vary, so it depends on
                 the detector and its normalisation. Defaults to the bands
                 measured on the hexagon detector. Only with `rope_per_axis`.
+            qk_norm: Per-head RMSNorm on queries and keys before they are
+                rotated, bounding the growth of the attention logits. The
+                rotation leaves the normalised length unchanged.
+            pooling: How the per-pulse embeddings become the one event
+                vector the task head reads. `"cls"` prepends a learned
+                token, which carries no coordinates and is not rotated, and
+                returns its output; `"mean"` averages the pulses and runs no
+                extra token. As on `DeepIce`, the `cls_token` parameter
+                exists either way, so a checkpoint loads under both.
+            rope_per_head: Spread each axis's band over the heads: the band
+                is sampled at `n_heads` times as many frequencies and head
+                `h` takes every `n_heads`-th one from the `h`-th on. Every
+                head still spans the whole band, and together the heads
+                resolve it `n_heads` times as finely as when they all
+                repeat one ladder. Only with `rope_per_axis`.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -121,11 +142,21 @@ class DeepIceRope(GNN):
                 "(2D rotation pairs split over 4 coordinates), got "
                 f"{head_size}."
             )
+        if pooling not in ("cls", "mean"):
+            raise ValueError(
+                f"pooling must be 'cls' or 'mean', got {pooling!r}"
+            )
+        self.pooling = pooling
         if coordinate_features is None and n_features < 5:
             raise ValueError(
                 "DeepIceRope assumes the NuBench feature order "
                 "(x, y, z, charge, t) and reads the time coordinate "
                 f"from column 4; got n_features={n_features}."
+            )
+        if rope_per_head and not rope_per_axis:
+            raise ValueError(
+                "rope_per_head spreads the per-axis bands over the heads, "
+                "which rope_per_axis=False replaces with one shared ladder"
             )
         if rope_axis_bands is not None:
             if not rope_per_axis:
@@ -168,6 +199,7 @@ class DeepIceRope(GNN):
                     num_heads=hidden_dim // head_size,
                     mlp_ratio=mlp_ratio,
                     init_values=1,
+                    qk_norm=qk_norm,
                 )
                 for _ in range(depth_rel)
             ]
@@ -181,6 +213,7 @@ class DeepIceRope(GNN):
                     mlp_ratio=mlp_ratio,
                     drop_path=0.0 * (i / max(depth - 1, 1)),
                     init_values=1,
+                    qk_norm=qk_norm,
                 )
                 for i in range(depth)
             ]
@@ -189,16 +222,35 @@ class DeepIceRope(GNN):
         pairs_per_axis = head_size // 2 // 4
         if rope_per_axis:
             axis_bands = rope_axis_bands or HEXAGON_AXIS_BANDS
-            omega = torch.cat(
+            n_heads = hidden_dim // head_size
+            n_ladder = pairs_per_axis * (n_heads if rope_per_head else 1)
+            ladders = torch.stack(
                 [
                     torch.exp(
                         torch.linspace(
-                            math.log(lo), math.log(hi), pairs_per_axis
+                            math.log(lo),
+                            math.log(hi),
+                            n_ladder,
+                            dtype=(
+                                torch.float64
+                                if rope_per_head
+                                else torch.float32
+                            ),
                         )
                     )
                     for lo, hi in axis_bands
                 ]
             )
+            if rope_per_head:
+                # `[heads, 4 * pairs_per_axis]`, each head's row laid out
+                # axis by axis like the shared ladder.
+                omega = (
+                    ladders.view(4, pairs_per_axis, n_heads)
+                    .permute(2, 0, 1)
+                    .reshape(n_heads, -1)
+                )
+            else:
+                omega = ladders.flatten()
         else:
             decay = torch.arange(pairs_per_axis, dtype=torch.float32) / max(
                 pairs_per_axis - 1, 1
@@ -264,35 +316,66 @@ class DeepIceRope(GNN):
             max_seqlen=x._get_max_seqlen() + 1,
         )
 
+    def _rope_table(
+        self, cos: Tensor, sin: Tensor, batch_idx: Tensor, batch_size: int
+    ) -> Tuple[Tensor, Tensor]:
+        """Lay the pulses' rotations out over the token stream.
+
+        With mean pooling the tokens are the pulses. With a class token
+        every event has one more leading slot, which keeps cos=1 / sin=0,
+        the identity rotation: the token has no coordinates.
+        """
+        if self.pooling == "mean":
+            return cos, sin
+        n_pulses = cos.shape[0]
+        shape = (n_pulses + batch_size, *cos.shape[1:])
+        rope_cos = cos.new_ones(shape)
+        rope_sin = sin.new_zeros(shape)
+        pos = torch.arange(n_pulses, device=cos.device) + batch_idx + 1
+        rope_cos[pos] = cos
+        rope_sin[pos] = sin
+        return rope_cos, rope_sin
+
     def _rope_angles(
         self, features: Tensor, batch_idx: Tensor, batch_size: int
-    ) -> tuple:
-        """Per-token rotation angles for the cls-prepended jagged stream.
+    ) -> Tuple[Tensor, Tensor]:
+        """Per-token cosine and sine of the rotation angles.
 
         Coordinates are (x, y, z, t), read from the columns
         `coordinate_features` names; by default 0-2 and 4, the NuBench
-        order, whose column 3 is charge. The cls slot of every event keeps
-        cos=1 / sin=0, the identity rotation.
+        order, whose column 3 is charge.
         """
-        coords = features[:, self._coordinate_columns].float()
-        angles = coords[:, self.rope_axis] * self.rope_omega
-        n_pulses = coords.shape[0]
-        rope_cos = angles.new_ones((n_pulses + batch_size, angles.shape[1]))
-        rope_sin = angles.new_zeros((n_pulses + batch_size, angles.shape[1]))
-        pos = torch.arange(n_pulses, device=angles.device) + batch_idx + 1
-        rope_cos[pos] = torch.cos(angles)
-        rope_sin[pos] = torch.sin(angles)
-        return rope_cos, rope_sin
+        coords = features[:, self._coordinate_columns]
+        if self.rope_omega.ndim == 1:
+            angles = coords.float()[:, self.rope_axis] * self.rope_omega
+            return self._rope_table(
+                torch.cos(angles), torch.sin(angles), batch_idx, batch_size
+            )
+        # One table per head, `[pulses, heads, head_size // 2]`. The phase
+        # is accumulated in float64, as in the nD class: a band spread over
+        # the heads reaches frequencies that put absolute phases at 1e4
+        # radians, where float32 rounding approaches the phase difference
+        # of two close pulses.
+        angles = coords.double()[:, None, self.rope_axis] * self.rope_omega
+        return self._rope_table(
+            torch.cos(angles).to(features.dtype),
+            torch.sin(angles).to(features.dtype),
+            batch_idx,
+            batch_size,
+        )
 
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
         x, _, seq_length = array_to_sequence(data.x, data.batch, nested=True)
         x = embed_pulses(self.fourier_ext, self.fourier_mlp, x, seq_length)
-        x = self._prepend_cls_nested(x, data.batch)
+        if self.pooling == "cls":
+            x = self._prepend_cls_nested(x, data.batch)
         rope_cos, rope_sin = self._rope_angles(
             data.x, data.batch, seq_length.numel()
         )
         x = self._blocks_fn(x, rope_cos=rope_cos, rope_sin=rope_sin)
+        if self.pooling == "mean":
+            return DeepIce._mean_pool(x.values(), data.batch, seq_length)
         # The cls token output of each event sits at its sequence start.
         return x.values()[x.offsets()[:-1]]
 
