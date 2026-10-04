@@ -62,20 +62,16 @@ def _kwargs(include_dynedge: bool = False) -> Dict[str, Any]:
 
 @pytest.mark.parametrize("q_tile", [8, 64, 1000])
 @pytest.mark.parametrize("include_dynedge", [False, True])
+@pytest.mark.parametrize("rel_qk_norm", [False, True])
 def test_tiled_bit_identical_to_dense(
-    q_tile: int, include_dynedge: bool
+    q_tile: int, include_dynedge: bool, rel_qk_norm: bool
 ) -> None:
     """Same weights -> identical output, at any tile size."""
     torch.manual_seed(0)
-    dense = DeepIce(**_kwargs(include_dynedge)).double().eval()
+    kwargs = dict(_kwargs(include_dynedge), rel_qk_norm=rel_qk_norm)
+    dense = DeepIce(**kwargs).double().eval()
     tiled = (
-        DeepIce(
-            **_kwargs(include_dynedge),
-            rel_attention="tiled",
-            q_tile=q_tile,
-        )
-        .double()
-        .eval()
+        DeepIce(**kwargs, rel_attention="tiled", q_tile=q_tile).double().eval()
     )
     # A stock (dense) checkpoint loads into a tiled model unchanged.
     tiled.load_state_dict(dense.state_dict())
