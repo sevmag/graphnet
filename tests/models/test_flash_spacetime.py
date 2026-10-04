@@ -94,7 +94,11 @@ def _make_inputs(
 
 
 def _make_modules(
-    num_heads: int, head_dim: int, flags: Tuple[bool, bool], seed: int
+    num_heads: int,
+    head_dim: int,
+    flags: Tuple[bool, bool],
+    seed: int,
+    qk_norm: bool = False,
 ) -> Tuple[SpacetimeEncoder, Attention_rel]:
     torch.manual_seed(seed + 1)
     hidden = num_heads * head_dim
@@ -105,7 +109,13 @@ def _make_modules(
         num_heads,
         use_attn_bias=use_attn_bias,
         use_activation_bias=use_activation_bias,
+        qk_norm=qk_norm,
     ).double()
+    if attention.q_norm is not None and attention.k_norm is not None:
+        # Away from their initial ones, so the gains take part in the test.
+        with torch.no_grad():
+            attention.q_norm.weight.uniform_(0.5, 1.5)
+            attention.k_norm.weight.uniform_(0.5, 1.5)
     return spacetime, attention
 
 
@@ -129,6 +139,11 @@ def _reference_forward(
     flags: Tuple[bool, bool],
 ) -> torch.Tensor:
     q, k, v = attention_rel_oracle_inputs(attention, x)
+    if attention.q_norm is not None and attention.k_norm is not None:
+        # Where `Block_rel.forward_flash` normalises: between the
+        # projections and the op.
+        q = attention.q_norm(q)
+        k = attention.k_norm(k)
     out = spacetime_attention_reference(
         q,
         k,
@@ -163,17 +178,21 @@ FLAG_COMBINATIONS = [
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("flags", FLAG_COMBINATIONS)
 @pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("qk_norm", [False, True])
 def test_reference_matches_modules_forward(
     shape: Tuple[int, int, int, int],
     flags: Tuple[bool, bool],
     masked: bool,
+    qk_norm: bool,
 ) -> None:
     """Reference == SpacetimeEncoder∘Attention_rel on valid rows (fp64)."""
     _, _, num_heads, head_dim = shape
     x, feats, valid, mask = _make_inputs(
         *shape, masked, seed=hash(shape) % 2**31
     )
-    spacetime, attention = _make_modules(num_heads, head_dim, flags, seed=1)
+    spacetime, attention = _make_modules(
+        num_heads, head_dim, flags, seed=1, qk_norm=qk_norm
+    )
 
     out_module = _module_forward(spacetime, attention, x, feats, mask)
     out_reference = _reference_forward(
@@ -188,10 +207,12 @@ def test_reference_matches_modules_forward(
 @pytest.mark.parametrize("shape", SHAPES[1:4])
 @pytest.mark.parametrize("flags", FLAG_COMBINATIONS[:2])
 @pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("qk_norm", [False, True])
 def test_reference_matches_modules_backward(
     shape: Tuple[int, int, int, int],
     flags: Tuple[bool, bool],
     masked: bool,
+    qk_norm: bool,
 ) -> None:
     """Gradients through the reference match the module path (fp64).
 
@@ -203,7 +224,17 @@ def test_reference_matches_modules_backward(
     x, feats, valid, mask = _make_inputs(
         *shape, masked, seed=hash(shape) % 2**31
     )
-    spacetime, attention = _make_modules(num_heads, head_dim, flags, seed=2)
+    spacetime, attention = _make_modules(
+        num_heads, head_dim, flags, seed=2, qk_norm=qk_norm
+    )
+    norm_gains = (
+        [
+            ("q_norm", attention.q_norm.weight),
+            ("k_norm", attention.k_norm.weight),
+        ]
+        if attention.q_norm is not None and attention.k_norm is not None
+        else []
+    )
 
     grads: Dict[str, Dict[str, torch.Tensor]] = {}
     for name in ("module", "reference"):
@@ -224,6 +255,7 @@ def test_reference_matches_modules_backward(
             ("b", spacetime.projection.bias.grad),
             ("proj_q", attention.proj_q.weight.grad),
             ("proj_v", attention.proj_v.weight.grad),
+            *((key, gain.grad) for key, gain in norm_gains),
         ):
             assert tensor is not None, f"missing gradient for {key}"
             collected[key] = tensor.clone()

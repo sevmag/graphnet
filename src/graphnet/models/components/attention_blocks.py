@@ -575,13 +575,14 @@ class Block_rel(LightningModule):
             merge_heads,
         )
 
-        if self.attn.q_norm is not None:
-            raise NotImplementedError(
-                "qk_norm is not implemented for the fused spacetime kernel, "
-                "whose inputs are the unnormalised projections"
-            )
         xn = self.norm1(x)
         q, k, v = attention_rel_oracle_inputs(self.attn, xn)
+        if self.attn.q_norm is not None and self.attn.k_norm is not None:
+            # The kernel scales the query it is handed and contracts the
+            # bias against it, so normalising here is `Attention_rel`'s
+            # order: norm, scale, then both logit terms.
+            q = self.attn.q_norm(q)
+            k = self.attn.k_norm(k)
         out = flash_spacetime_attention(
             q,
             k,

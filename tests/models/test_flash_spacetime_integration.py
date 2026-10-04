@@ -43,7 +43,7 @@ def _make_batch(lengths: List[int], seed: int) -> Data:
 HEAD_SIZES = [48, 16]
 
 
-def _one(head_size: int, rel_attention: str) -> DeepIce:
+def _one(head_size: int, rel_attention: str, rel_qk_norm: bool) -> DeepIce:
     return DeepIce(
         hidden_dim=96,
         seq_length=64,
@@ -53,22 +53,28 @@ def _one(head_size: int, rel_attention: str) -> DeepIce:
         n_rel=1,
         n_features=5,
         rel_attention=rel_attention,
+        rel_qk_norm=rel_qk_norm,
     ).cuda()
 
 
-def _make_models(seed: int, head_size: int = 48) -> Tuple[DeepIce, DeepIce]:
+def _make_models(
+    seed: int, head_size: int = 48, rel_qk_norm: bool = False
+) -> Tuple[DeepIce, DeepIce]:
     torch.manual_seed(seed)
-    eager = _one(head_size, "dense")
-    flash = _one(head_size, "flash")
+    eager = _one(head_size, "dense", rel_qk_norm)
+    flash = _one(head_size, "flash", rel_qk_norm)
     flash.load_state_dict(eager.state_dict())
     return eager, flash
 
 
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("lengths", [[13], [7, 40, 1], [64, 17, 33, 2]])
-def test_deepice_forward_parity(lengths: List[int], head_size: int) -> None:
+@pytest.mark.parametrize("rel_qk_norm", [False, True])
+def test_deepice_forward_parity(
+    lengths: List[int], head_size: int, rel_qk_norm: bool
+) -> None:
     """Per-event outputs match between eager and flash sandwiches (fp32)."""
-    eager, flash = _make_models(3, head_size)
+    eager, flash = _make_models(3, head_size, rel_qk_norm)
     data = _make_batch(lengths, 11)
     with torch.no_grad():
         out_e = eager(data)
@@ -79,9 +85,12 @@ def test_deepice_forward_parity(lengths: List[int], head_size: int) -> None:
 
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("lengths", [[7, 40, 1], [64, 17, 33, 2]])
-def test_deepice_backward_parity(lengths: List[int], head_size: int) -> None:
+@pytest.mark.parametrize("rel_qk_norm", [False, True])
+def test_deepice_backward_parity(
+    lengths: List[int], head_size: int, rel_qk_norm: bool
+) -> None:
     """Parameter gradients match, including SpacetimeEncoder projection."""
-    eager, flash = _make_models(5, head_size)
+    eager, flash = _make_models(5, head_size, rel_qk_norm)
     data = _make_batch(lengths, 13)
     torch.manual_seed(99)
     weights = torch.randn(len(lengths), 96, device="cuda")
