@@ -47,12 +47,13 @@ that bound.
 """
 
 import math
-from typing import Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
 
 from graphnet.models.transformer.icemix_rope import DeepIceRope
+from graphnet.models.transformer.inputs import FourierSchema
 
 # Geometric-mean frequency of each axis's measured pulse-pair band on the
 # hexagon detector (x, y, z, t); see `DeepIceRope`'s per-axis bands. Used to
@@ -117,6 +118,11 @@ class DeepIceRopeND(DeepIceRope):
         rope_base: Optional[float] = None,
         axis_scales: Sequence[float] = HEXAGON_AXIS_SCALES,
         rope_seed: int = 42,
+        fourier_schema: Optional[FourierSchema] = None,
+        input_feature_names: Optional[List[str]] = None,
+        fourier_mlp_dim: Optional[int] = None,
+        fourier_kwargs: Optional[Dict[str, Any]] = None,
+        coordinate_features: Optional[Sequence[str]] = None,
     ):
         """Construct `DeepIceRopeND`.
 
@@ -133,8 +139,8 @@ class DeepIceRopeND(DeepIceRope):
                 relative-attention sandwich.
             scaled_emb: Whether to scale the sinusoidal positional
                 embeddings.
-            n_features: The number of features in the input data. At least
-                5, in the NuBench order (x, y, z, charge, t).
+            n_features: The number of features in the input data; see
+                `DeepIceRope`.
             compile_blocks: Wrap the transformer block stack in
                 `torch.compile`.
             rope_base: Frequency base of the scale ladder. Defaults to the
@@ -147,6 +153,12 @@ class DeepIceRopeND(DeepIceRope):
                 vectors are stored in the state dict, so a checkpoint is
                 exact regardless of this value; the seed only makes a fresh
                 model reproducible.
+            fourier_schema: See `DeepIceRope`.
+            input_feature_names: See `DeepIceRope`.
+            fourier_mlp_dim: See `DeepIceRope`.
+            fourier_kwargs: See `DeepIceRope`.
+            coordinate_features: See `DeepIceRope`. `axis_scales` follow the
+                same (x, y, z, t) order.
         """
         super().__init__(
             hidden_dim=hidden_dim,
@@ -159,6 +171,11 @@ class DeepIceRopeND(DeepIceRope):
             n_features=n_features,
             rope_per_axis=True,
             compile_blocks=compile_blocks,
+            fourier_schema=fourier_schema,
+            input_feature_names=input_feature_names,
+            fourier_mlp_dim=fourier_mlp_dim,
+            fourier_kwargs=fourier_kwargs,
+            coordinate_features=coordinate_features,
         )
         n_dims = 4
         n_heads = hidden_dim // head_size
@@ -208,8 +225,9 @@ class DeepIceRopeND(DeepIceRope):
     ) -> Tuple[Tensor, Tensor]:
         """Per-token, per-head rotation angles for the jagged stream.
 
-        Coordinates are (x, y, z, t) — with the NuBench feature order the
-        time column is index 4, not 3 (index 3 is charge). Returns
+        Coordinates are (x, y, z, t), read from the columns
+        `coordinate_features` names; by default 0-2 and 4, the NuBench
+        order, whose column 3 is charge. Returns
         `[tokens, heads, head_size // 2]` cosine/sine pairs; the cls slot of
         every event and any rotation plane beyond `rope_planes` keep
         cos = 1 / sin = 0, the identity rotation.
@@ -219,7 +237,10 @@ class DeepIceRopeND(DeepIceRope):
         # so absolute phases reach 1e4 radians or more, where a float32
         # argument's rounding error alone is enough to corrupt the phase
         # *difference* that makes the encoding relative.
-        coords = features[:, [0, 1, 2, 4]].double() * self.rope_axis_scales
+        coords = (
+            features[:, self._coordinate_columns].double()
+            * self.rope_axis_scales
+        )
         # <omega, x> for every head and wave vector, then the scale ladder.
         projected = torch.einsum("pd,hmd->phm", coords, self.rope_wave)
         angles = (projected.unsqueeze(-1) * self.rope_scales).flatten(-2)

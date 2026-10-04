@@ -15,15 +15,31 @@ import math
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Callable, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from graphnet.models.components.attention_blocks import Block
-from graphnet.models.components.embedding import FourierEncoderEPJC
 from graphnet.models.gnn.gnn import GNN
+from graphnet.models.transformer.inputs import (
+    FourierSchema,
+    build_fourier_tokenizer,
+    embed_pulses,
+    resolve_coordinates,
+)
 from graphnet.models.utils import array_to_sequence
 
 from torch_geometric.data import Data
 from torch import Tensor
+
+# One geometric frequency band per coordinate (x, y, z, t), spanning the range
+# where that axis's measured pulse-pair coordinate differences actually vary
+# on the hexagon detector. A single shared ladder wastes most frequencies
+# out-of-band per axis; matched bands place every frequency where it resolves.
+HEXAGON_AXIS_BANDS = (
+    (0.50, 8.23),
+    (0.47, 16.12),
+    (5.84, 193.57),
+    (1237.0, 68921.0),
+)
 
 
 class DeepIceRope(GNN):
@@ -41,6 +57,12 @@ class DeepIceRope(GNN):
         n_features: int = 5,
         rope_per_axis: bool = True,
         compile_blocks: bool = False,
+        fourier_schema: Optional[FourierSchema] = None,
+        input_feature_names: Optional[List[str]] = None,
+        fourier_mlp_dim: Optional[int] = None,
+        fourier_kwargs: Optional[Dict[str, Any]] = None,
+        coordinate_features: Optional[Sequence[str]] = None,
+        rope_axis_bands: Optional[Sequence[Tuple[float, float]]] = None,
     ):
         """Construct `DeepIceRope`.
 
@@ -56,19 +78,41 @@ class DeepIceRope(GNN):
                 relative-attention sandwich, keeping the total depth at
                 `depth_rel + depth`.
             scaled_emb: Whether to scale the sinusoidal positional embeddings.
-            n_features: The number of features in the input data. At least
+            n_features: The number of features in the input data, read by
+                `FourierEncoderEPJC`. Without `coordinate_features` at least
                 5, in the NuBench order (x, y, z, charge, t): the rotation
-                reads the coordinates from columns 0-2 and time from
+                then reads the coordinates from columns 0-2 and time from
                 column 4.
             rope_per_axis: Use a separate geometric RoPE frequency band per
-                coordinate (x, y, z, t), matched to the measured range of
-                pulse-pair coordinate differences on the hexagon detector,
-                instead of one shared ladder repeated across axes.
+                coordinate (x, y, z, t) instead of one shared ladder repeated
+                across axes. The bands are `rope_axis_bands`.
             compile_blocks: Wrap the transformer block stack in
                 `torch.compile`. The jagged path issues many small ops per
                 step; compiling the whole stack as one graph is what turns
                 it from slower-than-padded (eager) into faster. No effect
                 on numerics.
+            fourier_schema: `{feature name: multiplier}` or
+                `{feature name: (multiplier, n_freq)}` for the columns to
+                embed, resolved against `input_feature_names`. Unset, the
+                encoder is `FourierEncoderEPJC` with its fixed layout.
+            input_feature_names: Input column names, in order. Required with
+                `fourier_schema` and `coordinate_features`.
+            fourier_mlp_dim: Hidden width of the projection that turns the
+                concatenated sinusoidal features into `hidden_dim`. Unset, it
+                is the concatenation's own width.
+            fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
+                `add_sequence_length` and `phase_dtype`. Only with
+                `fourier_schema`.
+            coordinate_features: Names of the x, y, z and time features, in
+                that order, resolved against `input_feature_names`: the
+                columns the rotation reads. Unset, they are columns 0-2 and
+                4.
+            rope_axis_bands: Lowest and highest rotation frequency for each
+                of x, y, z and t, in radians per unit of the normalised
+                coordinate. A band should span the range over which that
+                coordinate's pulse-pair differences vary, so it depends on
+                the detector and its normalisation. Defaults to the bands
+                measured on the hexagon detector. Only with `rope_per_axis`.
         """
         super().__init__(seq_length, hidden_dim)
         if head_size % 8 != 0:
@@ -77,18 +121,43 @@ class DeepIceRope(GNN):
                 "(2D rotation pairs split over 4 coordinates), got "
                 f"{head_size}."
             )
-        if n_features < 5:
+        if coordinate_features is None and n_features < 5:
             raise ValueError(
                 "DeepIceRope assumes the NuBench feature order "
                 "(x, y, z, charge, t) and reads the time coordinate "
                 f"from column 4; got n_features={n_features}."
             )
-        self.fourier_ext = FourierEncoderEPJC(
+        if rope_axis_bands is not None:
+            if not rope_per_axis:
+                raise ValueError(
+                    "rope_axis_bands set the per-axis bands, which "
+                    "rope_per_axis=False replaces with one shared ladder"
+                )
+            if len(rope_axis_bands) != 4 or any(
+                not 0 < lo <= hi for lo, hi in rope_axis_bands
+            ):
+                raise ValueError(
+                    "rope_axis_bands needs a (lowest, highest) pair of "
+                    "positive frequencies for each of x, y, z and t, got "
+                    f"{list(rope_axis_bands)}"
+                )
+        self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
             seq_length=seq_length,
-            mlp_dim=None,
             output_dim=hidden_dim,
             scaled=scaled_emb,
             n_features=n_features,
+            fourier_schema=fourier_schema,
+            input_feature_names=input_feature_names,
+            mlp_dim=fourier_mlp_dim,
+            fourier_kwargs=fourier_kwargs,
+        )
+        self._coordinate_columns = list(
+            resolve_coordinates(
+                coordinate_features,
+                input_feature_names,
+                "coordinate_features",
+                default=(0, 1, 2, 4),
+            )
         )
         # The `sandwich`/`blocks` split mirrors `DeepIce`'s module layout,
         # so weights transfer between the two classes via plain state_dicts.
@@ -119,17 +188,7 @@ class DeepIceRope(GNN):
 
         pairs_per_axis = head_size // 2 // 4
         if rope_per_axis:
-            # One geometric frequency band per coordinate (x, y, z, t),
-            # spanning the range where that axis's measured pulse-pair
-            # coordinate differences actually vary on the hexagon detector.
-            # A single shared ladder wastes most frequencies out-of-band per
-            # axis; matched bands place every frequency where it resolves.
-            axis_bands = [
-                (0.50, 8.23),
-                (0.47, 16.12),
-                (5.84, 193.57),
-                (1237.0, 68921.0),
-            ]
+            axis_bands = rope_axis_bands or HEXAGON_AXIS_BANDS
             omega = torch.cat(
                 [
                     torch.exp(
@@ -210,11 +269,12 @@ class DeepIceRope(GNN):
     ) -> tuple:
         """Per-token rotation angles for the cls-prepended jagged stream.
 
-        Coordinates are (x, y, z, t); with the NuBench feature order the
-        time column is index 4, not 3 (index 3 is charge). The cls slot
-        of every event keeps cos=1 / sin=0, the identity rotation.
+        Coordinates are (x, y, z, t), read from the columns
+        `coordinate_features` names; by default 0-2 and 4, the NuBench
+        order, whose column 3 is charge. The cls slot of every event keeps
+        cos=1 / sin=0, the identity rotation.
         """
-        coords = features[:, [0, 1, 2, 4]].float()
+        coords = features[:, self._coordinate_columns].float()
         angles = coords[:, self.rope_axis] * self.rope_omega
         n_pulses = coords.shape[0]
         rope_cos = angles.new_ones((n_pulses + batch_size, angles.shape[1]))
@@ -227,7 +287,7 @@ class DeepIceRope(GNN):
     def forward(self, data: Data) -> Tensor:
         """Apply learnable forward pass."""
         x, _, seq_length = array_to_sequence(data.x, data.batch, nested=True)
-        x = self.fourier_ext(x, seq_length)
+        x = embed_pulses(self.fourier_ext, self.fourier_mlp, x, seq_length)
         x = self._prepend_cls_nested(x, data.batch)
         rope_cos, rope_sin = self._rope_angles(
             data.x, data.batch, seq_length.numel()

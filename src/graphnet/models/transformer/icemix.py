@@ -9,7 +9,7 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, List, Optional, Tuple, Union, Callable
+from typing import Set, Dict, Any, List, Optional, Sequence, Callable
 
 from graphnet.models.components.attention_blocks import (
     Block_rel,
@@ -17,10 +17,14 @@ from graphnet.models.components.attention_blocks import (
 )
 from graphnet.models.components.embedding import (
     DirectionalSpacetimeEncoder,
-    FourierEncoder,
-    FourierEncoderEPJC,
     SpacetimeDistance,
     SpacetimeEncoder,
+)
+from graphnet.models.transformer.inputs import (
+    FourierSchema,
+    build_fourier_tokenizer,
+    embed_pulses,
+    resolve_coordinates,
 )
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
@@ -59,9 +63,7 @@ class DeepIce(GNN):
         spacetime_scale: float = 1024.0,
         spacetime_n_freq: float = 10000.0,
         spacetime_clip: float = 4.0,
-        fourier_schema: Optional[
-            Dict[str, Union[float, Tuple[float, float]]]
-        ] = None,
+        fourier_schema: Optional[FourierSchema] = None,
         input_feature_names: Optional[List[str]] = None,
         compile_blocks: bool = False,
         rel_attention: str = "dense",
@@ -69,6 +71,8 @@ class DeepIce(GNN):
         tiled_checkpoint: bool = True,
         pooling: str = "cls",
         fourier_mlp_dim: Optional[int] = None,
+        fourier_kwargs: Optional[Dict[str, Any]] = None,
+        spacetime_features: Optional[Sequence[str]] = None,
     ):
         """Construct `DeepIce`.
 
@@ -130,7 +134,7 @@ class DeepIce(GNN):
                 embed, resolved against `input_feature_names`. Unset, the
                 encoder is `FourierEncoderEPJC` with its fixed layout.
             input_feature_names: Input column names, in order. Required with
-                `fourier_schema`.
+                `fourier_schema` and `spacetime_features`.
             compile_blocks: Compile the block stack as one graph. No effect
                 on numerics.
             rel_attention: How the relative blocks build their spacetime
@@ -165,6 +169,13 @@ class DeepIce(GNN):
                 is pure width: unlike `seq_length` it carries no spectral
                 meaning, so narrowing it trades capacity without moving any
                 sinusoidal band.
+            fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
+                `add_sequence_length` and `phase_dtype`. Only with
+                `fourier_schema`.
+            spacetime_features: Names of the x, y, z and time features, in
+                that order, resolved against `input_feature_names`: the
+                columns the spacetime bias takes its interval from. Unset,
+                they are columns 0-3.
         """
         if rel_attention not in ("dense", "tiled", "flash"):
             raise ValueError(
@@ -173,48 +184,22 @@ class DeepIce(GNN):
             )
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
-        self.fourier_mlp: Optional[nn.Module] = None
-        if fourier_schema is None:
-            self.fourier_ext: nn.Module = FourierEncoderEPJC(
-                seq_length=seq_length,
-                mlp_dim=fourier_mlp_dim,
-                output_dim=fourier_out_dim,
-                scaled=scaled_emb,
-                n_features=n_features,
-            )
-        else:
-            # Naming the features is what makes a change of input order raise
-            # rather than shift every multiplier onto a neighbouring column.
-            names = input_feature_names or []
-            unknown = set(fourier_schema) - set(names)
-            if unknown:
-                raise ValueError(
-                    f"fourier_schema names {sorted(unknown)}, not among the "
-                    f"input features {names}."
-                )
-            self.fourier_ext = FourierEncoder(
-                schema={
-                    names.index(n): (
-                        (float(v[0]), float(v[1]))
-                        if isinstance(v, (tuple, list))
-                        else float(v)
-                    )
-                    for n, v in fourier_schema.items()
-                },
-                seq_length=seq_length,
-                scaled=scaled_emb,
-            )
-            # The general encoder leaves this projection to the model.
-            concat_dim = self.fourier_ext.output_dim
-            mlp_dim = (
-                concat_dim if fourier_mlp_dim is None else fourier_mlp_dim
-            )
-            self.fourier_mlp = nn.Sequential(
-                nn.Linear(concat_dim, mlp_dim),
-                nn.LayerNorm(mlp_dim),
-                nn.GELU(),
-                nn.Linear(mlp_dim, fourier_out_dim),
-            )
+        self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
+            seq_length=seq_length,
+            output_dim=fourier_out_dim,
+            scaled=scaled_emb,
+            n_features=n_features,
+            fourier_schema=fourier_schema,
+            input_feature_names=input_feature_names,
+            mlp_dim=fourier_mlp_dim,
+            fourier_kwargs=fourier_kwargs,
+        )
+        spacetime_columns = resolve_coordinates(
+            spacetime_features,
+            input_feature_names,
+            "spacetime_features",
+            default=(0, 1, 2, 3),
+        )
         self.rel_pos: nn.Module
         if rel_pos_encoder == "epjc":
             if rel_pos_kwargs or medium_key is not None:
@@ -224,11 +209,14 @@ class DeepIce(GNN):
                 )
             self.rel_pos = (
                 SpacetimeDistance(
-                    clip=spacetime_clip, time_scale=spacetime_time_scale
+                    clip=spacetime_clip,
+                    columns=spacetime_columns,
+                    time_scale=spacetime_time_scale,
                 )
                 if alibi_bias
                 else SpacetimeEncoder(
                     head_size,
+                    columns=spacetime_columns,
                     time_scale=spacetime_time_scale,
                     scale=spacetime_scale,
                     clip=spacetime_clip,
@@ -244,6 +232,7 @@ class DeepIce(GNN):
             self.rel_pos = DirectionalSpacetimeEncoder(
                 **{
                     "seq_length": head_size,
+                    "columns": spacetime_columns,
                     "time_scale": spacetime_time_scale,
                     "scale": spacetime_scale,
                     "clip": spacetime_clip,
@@ -268,6 +257,12 @@ class DeepIce(GNN):
             # a different code path, so the two cannot be combined.
             raise ValueError("rel_attention='tiled' cannot use alibi_bias")
         if rel_attention == "flash":
+            if spacetime_columns != (0, 1, 2, 3):
+                raise ValueError(
+                    "rel_attention='flash' reads (x, y, z, t) from columns "
+                    f"0-3, but spacetime_features puts them at "
+                    f"{spacetime_columns}"
+                )
             self._check_flash_config(
                 rel_pos_encoder,
                 alibi_bias,
@@ -543,9 +538,7 @@ class DeepIce(GNN):
             data.x, data.batch, padding_value=0
         )
         assert mask is not None
-        x = self.fourier_ext(x0, seq_length)
-        if self.fourier_mlp is not None:
-            x = self.fourier_mlp(x)
+        x = embed_pulses(self.fourier_ext, self.fourier_mlp, x0, seq_length)
         if self.include_dynedge:
             graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
