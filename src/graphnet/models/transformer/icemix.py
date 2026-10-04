@@ -9,7 +9,7 @@ Solution by DrHB: https://github.com/DrHB/icecube-2nd-place
 import torch
 import torch._dynamo
 import torch.nn as nn
-from typing import Set, Dict, Any, List, Optional, Callable
+from typing import Set, Dict, Any, List, Optional, Sequence, Callable
 
 from graphnet.models.components.attention_blocks import (
     Block_rel,
@@ -23,6 +23,7 @@ from graphnet.models.transformer.inputs import (
     FourierSchema,
     build_fourier_tokenizer,
     embed_pulses,
+    resolve_coordinates,
 )
 from graphnet.models.gnn.dynedge import DynEdge
 from graphnet.models.gnn.gnn import GNN
@@ -67,6 +68,7 @@ class DeepIce(GNN):
         pooling: str = "cls",
         fourier_mlp_dim: Optional[int] = None,
         fourier_kwargs: Optional[Dict[str, Any]] = None,
+        spacetime_features: Optional[Sequence[str]] = None,
     ):
         """Construct `DeepIce`.
 
@@ -115,7 +117,7 @@ class DeepIce(GNN):
                 embed, resolved against `input_feature_names`. Unset, the
                 encoder is `FourierEncoderEPJC` with its fixed layout.
             input_feature_names: Input column names, in order. Required with
-                `fourier_schema`.
+                `fourier_schema` and `spacetime_features`.
             compile_blocks: Compile the block stack as one graph. No effect
                 on numerics.
             rel_attention: How the relative blocks build their spacetime
@@ -150,6 +152,10 @@ class DeepIce(GNN):
             fourier_kwargs: Further arguments of `FourierEncoder`: `n_freq`,
                 `add_sequence_length` and `phase_dtype`. Only with
                 `fourier_schema`.
+            spacetime_features: Names of the x, y, z and time features, in
+                that order, resolved against `input_feature_names`: the
+                columns the spacetime bias takes its interval from. Unset,
+                they are columns 0-3.
         """
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
@@ -162,6 +168,12 @@ class DeepIce(GNN):
             input_feature_names=input_feature_names,
             mlp_dim=fourier_mlp_dim,
             fourier_kwargs=fourier_kwargs,
+        )
+        spacetime_columns = resolve_coordinates(
+            spacetime_features,
+            input_feature_names,
+            "spacetime_features",
+            default=(0, 1, 2, 3),
         )
         if rel_attention not in ("dense", "tiled", "flash"):
             raise ValueError(
@@ -196,6 +208,12 @@ class DeepIce(GNN):
                     f"so it needs the shipped values and no alibi_bias; got "
                     f"{off or 'alibi_bias=True'}"
                 )
+            if spacetime_columns != (0, 1, 2, 3):
+                raise ValueError(
+                    "rel_attention='flash' reads (x, y, z, t) from columns "
+                    f"0-3, but spacetime_features puts them at "
+                    f"{spacetime_columns}"
+                )
         if rel_attention == "tiled" and alibi_bias:
             # The tiled path contracts a per-pair feature vector with the
             # query; ALiBi's bias is a scalar per pair and is consumed by
@@ -203,11 +221,14 @@ class DeepIce(GNN):
             raise ValueError("rel_attention='tiled' cannot use alibi_bias")
         self.rel_pos: nn.Module = (
             SpacetimeDistance(
-                clip=spacetime_clip, time_scale=spacetime_time_scale
+                clip=spacetime_clip,
+                columns=spacetime_columns,
+                time_scale=spacetime_time_scale,
             )
             if alibi_bias
             else SpacetimeEncoder(
                 head_size,
+                columns=spacetime_columns,
                 time_scale=spacetime_time_scale,
                 scale=spacetime_scale,
                 clip=spacetime_clip,
