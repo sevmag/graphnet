@@ -52,6 +52,7 @@ class DeepIce(GNN):
         n_features: int = 6,
         use_nested_attention: bool = False,
         qk_norm: bool = False,
+        rel_qk_norm: bool = False,
         use_attn_bias: bool = True,
         use_activation_bias: bool = True,
         alibi_bias: bool = False,
@@ -94,6 +95,10 @@ class DeepIce(GNN):
                 relative blocks are unaffected: their bias needs padding.
             qk_norm: Per-head RMSNorm on queries and keys in the plain
                 blocks, bounding the growth of the attention logits.
+            rel_qk_norm: The same normalisation in the relative blocks. Its
+                own switch because it adds parameters to them, which a
+                checkpoint trained with `qk_norm` alone does not hold. Not
+                available with `rel_attention="flash"`.
             use_attn_bias: Add the spacetime bias to the relative blocks'
                 pre-softmax logits, as `<q_i, R_ij>`.
             use_activation_bias: Add it to their post-softmax output, as
@@ -158,6 +163,11 @@ class DeepIce(GNN):
                 they are columns 0-3.
         """
         super().__init__(seq_length, hidden_dim)
+        if rel_qk_norm and rel_attention == "flash":
+            raise ValueError(
+                "rel_attention='flash' takes the unnormalised query and key "
+                "projections, so it cannot be combined with rel_qk_norm"
+            )
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
         self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
             seq_length=seq_length,
@@ -243,6 +253,7 @@ class DeepIce(GNN):
                     use_attn_bias=use_attn_bias,
                     use_activation_bias=use_activation_bias,
                     alibi=alibi_bias,
+                    qk_norm=rel_qk_norm,
                 )
                 for _ in range(depth_rel)
             ]
