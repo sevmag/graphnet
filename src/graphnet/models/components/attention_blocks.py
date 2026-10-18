@@ -1,6 +1,6 @@
 """Attention and transformer blocks used in graphnet models."""
 
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Optional, Tuple, Union, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ from pytorch_lightning import LightningModule
 
 if TYPE_CHECKING:
     from graphnet.models.components.embedding import (
+        LinearDifferencesBias,
         SpacetimeEncoder,
         SpacetimeEncoderEPJC,
     )
@@ -709,6 +710,9 @@ class Block(LightningModule):
         max_seqlen: int,
         rope_cos: Optional[Tensor] = None,
         rope_sin: Optional[Tensor] = None,
+        pair_bias: Optional[
+            Tuple["LinearDifferencesBias", Tensor, Tensor]
+        ] = None,
     ) -> Tensor:
         """Self-attention over a jagged sequence held as dense values.
 
@@ -721,6 +725,10 @@ class Block(LightningModule):
         projections and head reshapes stay on the dense buffer, since eager
         jagged tensors lack `layer_norm`/`unflatten` under `inference_mode`
         (the eval/predict path) and would otherwise raise there.
+
+        `pair_bias` is a `LinearDifferencesBias` with the per-step sines and
+        cosines it computed; it widens queries, keys and values so that the
+        same attention call adds its bias.
         """
         attn = self.attn
         qkv = linear(v, attn.in_proj_weight, attn.in_proj_bias)
@@ -740,24 +748,36 @@ class Block(LightningModule):
             )
 
         def to_heads(t: Tensor) -> Tensor:
-            # dense [N, D] -> jagged [B, num_heads, S*, head_dim]
-            t = t.contiguous().unflatten(-1, [attn.num_heads, attn.head_dim])
+            # dense [N, num_heads, width] -> jagged [B, num_heads, S*, width]
             t = torch.nested.nested_tensor_from_jagged(
-                t, offsets, min_seqlen=min_seqlen, max_seqlen=max_seqlen
+                t.contiguous(),
+                offsets,
+                min_seqlen=min_seqlen,
+                max_seqlen=max_seqlen,
             )
             return t.transpose(1, 2)
+
+        heads = [attn.num_heads, attn.head_dim]
+        q, k, val = (t.unflatten(-1, heads) for t in (q, k, val))
+        scale = None
+        fold = None
+        if pair_bias is not None:
+            encoder, sin, cos = pair_bias
+            q, k, val, fold = encoder.extend(q, k, val, sin, cos)
+            # The widened queries carry the head scale already.
+            scale = 1.0
 
         out = scaled_dot_product_attention(
             to_heads(q),
             to_heads(k),
             to_heads(val),
             dropout_p=attn.dropout if self.training else 0.0,
+            scale=scale,
         )
-        out = (
-            out.transpose(1, 2)
-            .values()
-            .reshape(-1, attn.num_heads * attn.head_dim)
-        )
+        out = out.transpose(1, 2).values()
+        if fold is not None:
+            out = fold(out)
+        out = out.reshape(-1, attn.num_heads * attn.head_dim)
         return linear(out, attn.out_proj.weight, attn.out_proj.bias)
 
     def forward_jagged(
@@ -768,6 +788,9 @@ class Block(LightningModule):
         max_seqlen: int,
         rope_cos: Optional[Tensor] = None,
         rope_sin: Optional[Tensor] = None,
+        pair_bias: Optional[
+            Tuple["LinearDifferencesBias", Tensor, Tensor]
+        ] = None,
     ) -> Tensor:
         """Block forward on the dense values of a jagged sequence.
 
@@ -782,6 +805,7 @@ class Block(LightningModule):
             max_seqlen,
             rope_cos=rope_cos,
             rope_sin=rope_sin,
+            pair_bias=pair_bias,
         )
         if self.gamma_1 is None:
             v = v + self.drop_path(attn_out)
