@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.functional import Tensor
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from pytorch_lightning import LightningModule
 from torch_geometric.utils import add_self_loops
@@ -852,6 +852,157 @@ class SpacetimeDistance(LightningModule):
         """Forward pass."""
         four_distance = signed_four_distance(x, self.time_scale, self.columns)
         return four_distance.clip(-self.clip, self.clip)
+
+
+class LinearDifferencesBias(LightningModule):
+    """A pair bias linear in the embedded coordinate differences.
+
+    The bias of a pair of steps is a linear map of the sinusoidal embedding
+    of their signed differences in x, y, z and `c * t`, as in
+    `DirectionalSpacetimeEncoder`'s `"differences"` form without its MLP.
+    Each embedded quantity is the sine or cosine of a difference of
+    per-step phases, which the angle-subtraction identities split into
+    per-step factors,
+
+        sin(a_i - a_j) = sin a_i cos a_j - cos a_i sin a_j,
+        cos(a_i - a_j) = cos a_i cos a_j + sin a_i sin a_j.
+
+    The key-side bias `<q_i, R_ij>` is then a dot product of a per-step
+    vector built from `q_i` and the per-step sines and cosines of step `j`,
+    and the value-side bias `sum_j P_ij R_ij` follows from attending over
+    those sines and cosines. Both therefore ride along in a single call of
+    ordinary scaled-dot-product attention, with the queries, keys and
+    values widened by the per-step factors, and no per-pair tensor is ever
+    formed: memory grows with the number of steps rather than its square,
+    and the fused attention kernels apply.
+
+    The bias is shared by the heads, as in `Attention_rel`, and its
+    arithmetic follows `Attention_rel`'s: the scaled query enters both the
+    content and the bias term. The bias of the projection shifts every
+    logit of a row equally, which the softmax ignores, so only its value
+    side remains.
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        seq_length: int = 32,
+        time_scale: float = 1.0,
+        scale: float = 1024.0,
+        n_freq: float = 10000.0,
+    ):
+        """Construct `LinearDifferencesBias`.
+
+        Args:
+            head_dim: Width of each attention head, the width of the bias.
+            seq_length: Width of the sinusoidal embedding of each of the four
+                differences.
+            time_scale: Factor converting the time coordinate into the
+                position coordinates' length unit, `t_scale * c / pos_scale`
+                for the normalisation in use. A learnable multiplier on it
+                starts at one.
+            scale: Multiplier applied before the sinusoidal ladder.
+            n_freq: Span of the frequency ladder.
+        """
+        super().__init__()
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        self.head_dim = head_dim
+        self.time_scale = time_scale
+        self.scale = scale
+        self.log_speed = nn.Parameter(torch.zeros(1))
+        self.projection = nn.Linear(4 * seq_length, head_dim)
+
+    @property
+    def n_factors(self) -> int:
+        """Per-step sines (or cosines): four coordinates times the ladder."""
+        return 4 * self.sin_emb.freqs.numel()
+
+    def phases(self, coordinates: Tensor) -> Tuple[Tensor, Tensor]:
+        """Per-step sines and cosines of the ladder phases.
+
+        Args:
+            coordinates: `(x, y, z, t)` of each step, shape `[steps, 4]`.
+
+        Returns:
+            Sines and cosines, each `[steps, 4 * seq_length / 2]`, laid out
+            coordinate by coordinate.
+        """
+        speed = self.time_scale * torch.exp(self.log_speed)
+        per_step = torch.cat(
+            [coordinates[:, :3], speed * coordinates[:, 3:4]], dim=-1
+        )
+        # A step's phases reach several thousand radians, where float32
+        # rounding alone is comparable to the phase difference of two close
+        # steps; the bounded sine and cosine are cast back afterwards.
+        phase = (
+            self.scale
+            * per_step.double().unsqueeze(-1)
+            * self.sin_emb.freqs.double()
+            * self.sin_emb.scale
+        )
+        return (
+            torch.sin(phase).to(coordinates.dtype).flatten(-2),
+            torch.cos(phase).to(coordinates.dtype).flatten(-2),
+        )
+
+    def _weights(self) -> Tuple[Tensor, Tensor]:
+        """Projection weights acting on the sines and on the cosines."""
+        half = self.sin_emb.freqs.numel()
+        weight = self.projection.weight.view(self.head_dim, 4, 2, half)
+        return weight[:, :, 0].flatten(-2), weight[:, :, 1].flatten(-2)
+
+    def extend(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        sin: Tensor,
+        cos: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor, Callable[[Tensor], Tensor]]:
+        """Widen queries, keys and values so attention carries the bias.
+
+        Args:
+            q: Queries, `[steps, heads, head_dim]`, unscaled.
+            k: Keys, `[steps, heads, head_dim]`.
+            v: Values, `[steps, heads, head_dim]`.
+            sin: Per-step sines from `phases`.
+            cos: Per-step cosines from `phases`.
+
+        Returns:
+            Widened queries, keys and values, to be attended over with a
+            softmax scale of one, and the map from that attention's output
+            back to `[steps, heads, head_dim]`.
+        """
+        w_sin, w_cos = self._weights()
+        q = q * self.head_dim**-0.5
+        u_sin, u_cos = q @ w_sin, q @ w_cos  # [steps, heads, n_factors]
+        s, c = sin.unsqueeze(1), cos.unsqueeze(1)
+        heads = q.shape[1]
+        q_wide = torch.cat(
+            [q, u_sin * s + u_cos * c, u_cos * s - u_sin * c], -1
+        )
+        k_wide = torch.cat(
+            [k, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
+        )
+        v_wide = torch.cat(
+            [v, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
+        )
+        n = self.n_factors
+
+        def fold(out: Tensor) -> Tensor:
+            mean_cos = out[..., self.head_dim : self.head_dim + n]
+            mean_sin = out[..., self.head_dim + n :]
+            # Attention-weighted sums of sin and cos of the pair phases.
+            pair_sin = s * mean_cos - c * mean_sin
+            pair_cos = c * mean_cos + s * mean_sin
+            return (
+                out[..., : self.head_dim]
+                + pair_sin @ w_sin.T
+                + pair_cos @ w_cos.T
+                + self.projection.bias
+            )
+
+        return q_wide, k_wide, v_wide, fold
 
 
 class RRWPLinearNodeEncoder(LightningModule):
