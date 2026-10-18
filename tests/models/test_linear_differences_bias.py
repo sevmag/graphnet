@@ -1,11 +1,15 @@
 """Tests for the pair bias that runs inside fused attention."""
 
+from typing import List
+
 import torch
 from torch import Tensor
 from torch.nn.functional import linear
+from torch_geometric.data import Batch, Data
 
 from graphnet.models.components.attention_blocks import Block
 from graphnet.models.components.embedding import LinearDifferencesBias
+from graphnet.models.transformer import DeepIceLinearBias
 
 HEADS, HEAD_DIM = 2, 16
 LENGTHS = [5, 9, 1]
@@ -95,3 +99,28 @@ def test_bias_depends_only_on_differences() -> None:
     with torch.no_grad():
         shifted = coords + torch.tensor([0.4, -0.7, 0.2, 0.05])
         torch.testing.assert_close(attend(shifted), attend(coords))
+
+
+def _batch(lengths: List[int]) -> Batch:
+    generator = torch.Generator().manual_seed(2)
+    return Batch.from_data_list(
+        [Data(x=torch.randn(n, 6, generator=generator) * 0.3) for n in lengths]
+    )
+
+
+def test_model_reads_each_event_alone() -> None:
+    """An event's vector is the same alone as inside a batch."""
+    torch.manual_seed(0)
+    model = DeepIceLinearBias(
+        hidden_dim=64, seq_length=32, depth=2, head_size=16, qk_norm=True
+    ).eval()
+    batch = _batch([17, 30, 1])
+    with torch.no_grad():
+        together = model(batch)
+        assert together.shape == (3, 64)
+        assert torch.isfinite(together).all()
+        for i, event in enumerate(batch.to_data_list()):
+            alone = model(Batch.from_data_list([event]))
+            torch.testing.assert_close(
+                alone[0], together[i], atol=1e-5, rtol=1e-4
+            )
