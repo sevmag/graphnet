@@ -1,5 +1,7 @@
 """Unit tests for `DirectionalSpacetimeEncoder`."""
 
+from typing import Any, Dict
+
 import pytest
 import torch
 
@@ -193,3 +195,55 @@ def test_distinguishes_orientation_order() -> None:
     x = _pointing_steps()
     swapped = x[:, [1, 0]]
     assert not torch.allclose(encoder(x)[0, 0, 1], encoder(swapped)[0, 0, 1])
+
+
+@pytest.mark.parametrize("n_media", [1, 2])
+@pytest.mark.parametrize("pointing", [False, True])
+def test_separable_matches_the_pair_features(
+    n_media: int, pointing: bool
+) -> None:
+    """The per-step factorisation is the same function, gradients included."""
+    torch.manual_seed(3)
+    kwargs: Dict[str, Any] = dict(
+        seq_length=8,
+        pair_features="differences",
+        clip=None,
+        time_scale=3.0,
+        n_media=n_media,
+        direction_columns=(4, 5, 6) if pointing else None,
+    )
+    dense = DirectionalSpacetimeEncoder(**kwargs).double()
+    separable = DirectionalSpacetimeEncoder(**kwargs, separable=True).double()
+    # The comparison is about the algebra, so both evaluate their phases in
+    # the input's precision.
+    dense.sin_emb.phase_dtype = None
+    with torch.no_grad():
+        for parameter in dense.parameters():
+            parameter.normal_(std=0.3)
+    separable.load_state_dict(dense.state_dict())
+
+    x = torch.randn(2, 6, 7, dtype=torch.float64) * 0.3
+    x[:, :, 4:] = x[:, :, 4:] / x[:, :, 4:].norm(dim=-1, keepdim=True)
+    x[:, 5] = x[:, 4]
+    medium = torch.tensor([0, n_media - 1])
+    out_dense = dense(x, medium)
+    out_separable = separable(x, medium)
+    torch.testing.assert_close(out_separable, out_dense, atol=1e-9, rtol=1e-9)
+
+    target = torch.randn_like(out_dense)
+    (out_dense * target).sum().backward()
+    (out_separable * target).sum().backward()
+    for (name, a), b in zip(dense.named_parameters(), separable.parameters()):
+        assert (a.grad is None) == (b.grad is None), name
+        if a.grad is not None:
+            torch.testing.assert_close(b.grad, a.grad, atol=1e-9, rtol=1e-9)
+
+
+@pytest.mark.parametrize(
+    "kwargs", [dict(pair_features="cartesian", clip=None), dict(clip=4.0)]
+)
+def test_separable_needs_unclipped_differences(kwargs: Dict[str, Any]) -> None:
+    """Range, interval and a clip do not split into per-step factors."""
+    arguments: Dict[str, Any] = {"pair_features": "differences", **kwargs}
+    with pytest.raises(ValueError, match="separable"):
+        DirectionalSpacetimeEncoder(seq_length=8, separable=True, **arguments)

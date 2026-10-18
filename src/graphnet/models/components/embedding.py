@@ -616,6 +616,21 @@ class DirectionalSpacetimeEncoder(LightningModule):
     has a learnable code that modulates the embedded features before the MLP
     (FiLM). Both start neutral, so every medium begins with the same map and
     departs from it only as far as the data asks.
+
+    With `separable`, the `"differences"` form is computed without building
+    the embedded pair features. Every scalar it embeds is a difference of
+    per-step quantities, so the angle-subtraction identities split the sine
+    and cosine of each pair's phase into per-step factors,
+
+        sin(a_i - a_j) = sin a_i cos a_j - cos a_i sin a_j,
+        cos(a_i - a_j) = cos a_i cos a_j + sin a_i sin a_j,
+
+    and the MLP's first layer becomes a product of a per-step query-side and
+    key-side matrix. The sinusoids are then evaluated once per step rather
+    than once per pair, and the widest per-pair tensor is never formed. The
+    result is the same function with the same parameters, so checkpoints
+    move freely between the two paths. A clip would make the embedded
+    scalar a non-separable function of the pair, so this needs `clip=None`.
     """
 
     # Keeps the square roots and the unit direction finite for pairs with no
@@ -637,6 +652,7 @@ class DirectionalSpacetimeEncoder(LightningModule):
         medium_dim: int = 16,
         pair_features: str = "polar",
         direction_columns: Optional[Tuple[int, int, int]] = None,
+        separable: bool = False,
     ):
         """Construct `DirectionalSpacetimeEncoder`.
 
@@ -669,13 +685,21 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 sensors' orientation out. Each component of half the
                 difference of the two directions is embedded with the
                 ladder.
+            separable: Compute the `"differences"` form from per-step
+                factors; see the class docstring. Needs `clip=None`.
         """
         if pair_features not in ("polar", "cartesian", "differences"):
             raise ValueError(
                 f"pair_features must be 'polar', 'cartesian' or "
                 f"'differences', got {pair_features!r}"
             )
+        if separable and (pair_features != "differences" or clip is not None):
+            raise ValueError(
+                "separable needs pair_features='differences' and clip=None: "
+                "only an unclipped difference splits into per-step factors"
+            )
         super().__init__()
+        self.separable = separable
         self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
         self.columns = columns
         self.time_scale = time_scale
@@ -783,6 +807,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
         time = x[:, :, ti]
 
         speed = self.time_scale * torch.exp(self.log_speed(medium))
+        if self.separable:
+            return self._separable_forward(x, pos, time, speed, medium)
         separation = pos[:, :, None] - pos[:, None, :]
         dt = speed.view(-1, 1, 1) * (time[:, :, None] - time[:, None, :])
         if self.pair_features == "differences":
@@ -812,6 +838,61 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 features * (1 + gamma[:, None, None]) + beta[:, None, None]
             )
         return self.mlp(features)
+
+    def _separable_forward(
+        self,
+        x: Tensor,
+        pos: Tensor,
+        time: Tensor,
+        speed: Tensor,
+        medium: Tensor,
+    ) -> Tensor:
+        """Compute the `"differences"` form from per-step sines and cosines."""
+        scalars = [pos, speed.view(-1, 1, 1) * time.unsqueeze(-1)]
+        if self.direction_columns is not None:
+            scalars.append(0.5 * x[:, :, list(self.direction_columns)])
+        per_step = torch.cat(scalars, dim=-1)  # [B, L, n]
+        batch, _, n_scalars = per_step.shape
+        freqs = self.sin_emb.freqs
+        half = freqs.numel()
+        # Each step's phases reach several thousand radians, where float32
+        # rounding alone is comparable to the phase difference of two close
+        # steps; the bounded sine and cosine are cast back afterwards.
+        phase = (
+            self.scale
+            * per_step.double().unsqueeze(-1)
+            * freqs.double()
+            * self.sin_emb.scale
+        )
+        sin = torch.sin(phase).to(x.dtype).flatten(-2)  # [B, L, n * half]
+        cos = torch.cos(phase).to(x.dtype).flatten(-2)
+
+        # The first layer's weights in the ladder layout: per scalar, the
+        # sine block of the embedding, then the cosine block.
+        first = self.mlp[0]
+        weight = first.weight.view(-1, n_scalars, 2, half)
+        w_sin = weight[:, :, 0].flatten(-2)  # [hidden, n * half]
+        w_cos = weight[:, :, 1].flatten(-2)
+        bias = first.bias.expand(batch, -1)  # [B, hidden]
+        if self.film is not None and self.medium_code is not None:
+            # A FiLM of the features is a per-event rescaling of the weights
+            # and a shift of the bias.
+            gamma, beta = self.film(self.medium_code(medium)).chunk(2, dim=-1)
+            gain = (1 + gamma).view(batch, 1, n_scalars, 2, half)
+            w_sin = w_sin * gain[:, :, :, 0].flatten(-2)
+            w_cos = w_cos * gain[:, :, :, 1].flatten(-2)
+            bias = bias + beta @ first.weight.T
+        else:
+            w_sin = w_sin.expand(batch, -1, -1)
+            w_cos = w_cos.expand(batch, -1, -1)
+
+        s_i, c_i = sin[:, :, None], cos[:, :, None]  # [B, L, 1, n * half]
+        w_s, w_c = w_sin[:, None], w_cos[:, None]  # [B, 1, hidden, n * half]
+        query = torch.cat([w_s * s_i + w_c * c_i, w_c * s_i - w_s * c_i], -1)
+        key = torch.cat([cos, sin], dim=-1)  # [B, L, 2 * n * half]
+        hidden = torch.einsum("bimf,bjf->bijm", query, key)
+        hidden = hidden + bias[:, None, None]
+        return self.mlp[2](self.mlp[1](hidden))
 
 
 class SpacetimeDistance(LightningModule):
