@@ -1,6 +1,8 @@
 """Tests for the pair bias that runs inside fused attention."""
 
-from typing import List
+from typing import Any, Dict, List, Optional
+
+import pytest
 
 import torch
 from torch import Tensor
@@ -15,10 +17,12 @@ HEADS, HEAD_DIM = 2, 16
 LENGTHS = [5, 9, 1]
 
 
-def _modules() -> tuple:
+def _modules(directions: bool = False) -> tuple:
     torch.manual_seed(0)
     block = Block(HEADS * HEAD_DIM, HEADS, qk_norm=True).double().eval()
-    bias = LinearDifferencesBias(HEAD_DIM, seq_length=8, time_scale=3.0)
+    bias = LinearDifferencesBias(
+        HEAD_DIM, seq_length=8, time_scale=3.0, directions=directions
+    )
     bias = bias.double()
     with torch.no_grad():
         block.q_norm.weight.uniform_(0.5, 1.5)
@@ -32,7 +36,11 @@ def _modules() -> tuple:
 
 
 def _reference(
-    block: Block, bias: LinearDifferencesBias, x: Tensor, coords: Tensor
+    block: Block,
+    bias: LinearDifferencesBias,
+    x: Tensor,
+    coords: Tensor,
+    pointing: Optional[Tensor] = None,
 ) -> Tensor:
     """`Attention_rel` arithmetic with the bias built for every pair."""
     attn = block.attn
@@ -42,14 +50,20 @@ def _reference(
     k = block.k_norm(k.unflatten(-1, [HEADS, HEAD_DIM]))
     v = v.unflatten(-1, [HEADS, HEAD_DIM])
     speed = bias.time_scale * torch.exp(bias.log_speed)
-    per_step = torch.cat([coords[:, :3], speed * coords[:, 3:]], -1)
+    scalars = [coords[:, :3], speed * coords[:, 3:]]
+    if pointing is not None:
+        scalars.append(0.5 * pointing)
+    per_step = torch.cat(scalars, -1)
     outputs, start = [], 0
     for n in LENGTHS:
         sl = slice(start, start + n)
         start += n
         difference = per_step[sl, None] - per_step[None, sl]  # [n, n, 4]
         embedded = torch.cat(
-            [bias.sin_emb(bias.scale * difference[..., a]) for a in range(4)],
+            [
+                bias.sin_emb(bias.scale * difference[..., a])
+                for a in range(difference.shape[-1])
+            ],
             -1,
         )
         pair = bias.projection(embedded)  # [n, n, C]
@@ -63,22 +77,27 @@ def _reference(
     return linear(torch.cat(outputs), attn.out_proj.weight, attn.out_proj.bias)
 
 
-def test_attention_matches_the_bias_built_per_pair() -> None:
+@pytest.mark.parametrize("directions", [False, True])
+def test_attention_matches_the_bias_built_per_pair(directions: bool) -> None:
     """Widened attention adds exactly the per-pair bias, both sides."""
-    block, bias = _modules()
+    block, bias = _modules(directions)
     generator = torch.Generator().manual_seed(1)
     n = sum(LENGTHS)
     x = torch.randn(
         n, HEADS * HEAD_DIM, generator=generator, dtype=torch.double
     )
     coords = torch.randn(n, 4, generator=generator, dtype=torch.double) * 0.3
+    pointing = None
+    if directions:
+        pointing = torch.randn(n, 3, generator=generator, dtype=torch.double)
+        pointing = pointing / pointing.norm(dim=-1, keepdim=True)
     offsets = torch.tensor([0] + LENGTHS).cumsum(0)
-    sin, cos = bias.phases(coords)
+    sin, cos = bias.phases(coords, pointing)
     with torch.no_grad():
         got = block._nested_self_attention(
             x, offsets, min(LENGTHS), max(LENGTHS), pair_bias=(bias, sin, cos)
         )
-        want = _reference(block, bias, x, coords)
+        want = _reference(block, bias, x, coords, pointing)
     torch.testing.assert_close(got, want, atol=1e-9, rtol=1e-9)
 
 
@@ -124,3 +143,25 @@ def test_model_reads_each_event_alone() -> None:
             torch.testing.assert_close(
                 alone[0], together[i], atol=1e-5, rtol=1e-4
             )
+
+
+def test_model_embeds_named_sensor_directions() -> None:
+    """With direction features the bias widens by three embedded scalars."""
+    names = ["x", "y", "z", "t", "q", "dx", "dy", "dz"]
+    kwargs: Dict[str, Any] = dict(
+        hidden_dim=64,
+        seq_length=16,
+        depth=1,
+        head_size=16,
+        fourier_schema={name: 1024.0 for name in names},
+        input_feature_names=names,
+        coordinate_features=["x", "y", "z", "t"],
+    )
+    plain = DeepIceLinearBias(**kwargs)
+    pointing = DeepIceLinearBias(
+        direction_features=["dx", "dy", "dz"], **kwargs
+    )
+    assert pointing.pair_bias.n_factors == plain.pair_bias.n_factors * 7 // 4
+    batch = Batch.from_data_list([Data(x=torch.randn(n, 8)) for n in (4, 9)])
+    with torch.no_grad():
+        assert torch.isfinite(pointing(batch)).all()

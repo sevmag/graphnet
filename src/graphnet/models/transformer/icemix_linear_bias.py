@@ -24,6 +24,7 @@ from graphnet.models.transformer.inputs import (
     FourierSchema,
     build_fourier_tokenizer,
     embed_pulses,
+    resolve_columns,
     resolve_coordinates,
 )
 from graphnet.models.utils import array_to_sequence
@@ -46,6 +47,7 @@ class DeepIceLinearBias(GNN):
         fourier_mlp_dim: Optional[int] = None,
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
+        direction_features: Optional[Sequence[str]] = None,
         qk_norm: bool = False,
         init_values: Optional[float] = None,
         bias_seq_length: Optional[int] = None,
@@ -74,6 +76,11 @@ class DeepIceLinearBias(GNN):
                 that order, resolved against `input_feature_names`: the
                 columns the pair bias takes its differences from. Unset,
                 they are columns 0-3.
+            direction_features: Names of the x, y and z components of each
+                pulse's sensor pointing direction, resolved against
+                `input_feature_names`. Given, the pair bias also embeds the
+                difference of the two pulses' directions; see
+                `LinearDifferencesBias`.
             qk_norm: Per-head RMSNorm on queries and keys, applied before the
                 bias is formed from the query.
             init_values: Initial LayerScale of the blocks, or None for none.
@@ -105,7 +112,18 @@ class DeepIceLinearBias(GNN):
                 default=(0, 1, 2, 3),
             )
         )
+        self._direction_columns: Optional[List[int]] = None
+        if direction_features is not None:
+            if len(direction_features) != 3:
+                raise ValueError(
+                    "direction_features names the x, y and z components, got "
+                    f"{list(direction_features)}"
+                )
+            self._direction_columns = resolve_columns(
+                direction_features, input_feature_names, "direction_features"
+            )
         self.pair_bias = LinearDifferencesBias(
+            directions=direction_features is not None,
             head_dim=head_size,
             seq_length=bias_seq_length or head_size,
             time_scale=bias_time_scale,
@@ -132,7 +150,14 @@ class DeepIceLinearBias(GNN):
         """
         x, _, seq_length = array_to_sequence(data.x, data.batch, nested=True)
         x = embed_pulses(self.fourier_ext, self.fourier_mlp, x, seq_length)
-        sin, cos = self.pair_bias.phases(data.x[:, self._coordinate_columns])
+        directions = (
+            data.x[:, self._direction_columns]
+            if self._direction_columns is not None
+            else None
+        )
+        sin, cos = self.pair_bias.phases(
+            data.x[:, self._coordinate_columns], directions
+        )
         offsets = x.offsets()
         min_seqlen = x._get_min_seqlen()
         max_seqlen = x._get_max_seqlen()
