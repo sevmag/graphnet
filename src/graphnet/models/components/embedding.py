@@ -645,6 +645,13 @@ class LinearDifferencesBias(LightningModule):
     content and the bias term. The bias of the projection shifts every
     logit of a row equally, which the softmax ignores, so only its value
     side remains.
+
+    With `directions`, the bias also embeds the components of half the
+    difference of the two steps' sensor pointing directions, as
+    `DirectionalSpacetimeEncoder` does: steps on one multi-sensor module
+    share a position, so without them such a pair differs only in time,
+    however the two sensors face. They are differences too, so they split
+    the same way.
     """
 
     def __init__(
@@ -654,6 +661,7 @@ class LinearDifferencesBias(LightningModule):
         time_scale: float = 1.0,
         scale: float = 1024.0,
         n_freq: float = 10000.0,
+        directions: bool = False,
     ):
         """Construct `LinearDifferencesBias`.
 
@@ -667,34 +675,50 @@ class LinearDifferencesBias(LightningModule):
                 starts at one.
             scale: Multiplier applied before the sinusoidal ladder.
             n_freq: Span of the frequency ladder.
+            directions: Also embed the difference of the steps' sensor
+                pointing directions; `phases` then takes them.
         """
         super().__init__()
         self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
         self.head_dim = head_dim
         self.time_scale = time_scale
         self.scale = scale
+        self.directions = directions
+        self.n_scalars = 7 if directions else 4
         self.log_speed = nn.Parameter(torch.zeros(1))
-        self.projection = nn.Linear(4 * seq_length, head_dim)
+        self.projection = nn.Linear(self.n_scalars * seq_length, head_dim)
 
     @property
     def n_factors(self) -> int:
-        """Per-step sines (or cosines): four coordinates times the ladder."""
-        return 4 * self.sin_emb.freqs.numel()
+        """Per-step sines (or cosines): embedded scalars times the ladder."""
+        return self.n_scalars * self.sin_emb.freqs.numel()
 
-    def phases(self, coordinates: Tensor) -> Tuple[Tensor, Tensor]:
+    def phases(
+        self, coordinates: Tensor, directions: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
         """Per-step sines and cosines of the ladder phases.
 
         Args:
             coordinates: `(x, y, z, t)` of each step, shape `[steps, 4]`.
+            directions: Each step's sensor pointing direction as a unit
+                vector, shape `[steps, 3]`; required with `directions`.
 
         Returns:
-            Sines and cosines, each `[steps, 4 * seq_length / 2]`, laid out
-            coordinate by coordinate.
+            Sines and cosines, each `[steps, n_factors]`, laid out scalar by
+            scalar.
         """
+        if (directions is not None) != self.directions:
+            raise ValueError(
+                "phases takes the steps' directions exactly when the bias "
+                "was built with directions=True"
+            )
         speed = self.time_scale * torch.exp(self.log_speed)
-        per_step = torch.cat(
-            [coordinates[:, :3], speed * coordinates[:, 3:4]], dim=-1
-        )
+        scalars = [coordinates[:, :3], speed * coordinates[:, 3:4]]
+        if directions is not None:
+            # Halved into [-1, 1], the range of a direction component, as in
+            # `DirectionalSpacetimeEncoder`.
+            scalars.append(0.5 * directions)
+        per_step = torch.cat(scalars, dim=-1)
         # A step's phases reach several thousand radians, where float32
         # rounding alone is comparable to the phase difference of two close
         # steps; the bounded sine and cosine are cast back afterwards.
@@ -712,7 +736,9 @@ class LinearDifferencesBias(LightningModule):
     def _weights(self) -> Tuple[Tensor, Tensor]:
         """Projection weights acting on the sines and on the cosines."""
         half = self.sin_emb.freqs.numel()
-        weight = self.projection.weight.view(self.head_dim, 4, 2, half)
+        weight = self.projection.weight.view(
+            self.head_dim, self.n_scalars, 2, half
+        )
         return weight[:, :, 0].flatten(-2), weight[:, :, 1].flatten(-2)
 
     def extend(
