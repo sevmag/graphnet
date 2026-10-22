@@ -531,6 +531,8 @@ class DirectionalSpacetimeEncoder(LightningModule):
         pair_features: str = "polar",
         direction_columns: Optional[Tuple[int, int, int]] = None,
         separable: bool = False,
+        direction_scale: Optional[float] = None,
+        direction_n_freq: Optional[float] = None,
     ):
         """Construct `DirectionalSpacetimeEncoder`.
 
@@ -565,6 +567,15 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 ladder.
             separable: Compute the `"differences"` form from per-step
                 factors; see the class docstring. Needs `clip=None`.
+            direction_scale: Multiplier before a ladder of the direction
+                differences' own, or None to embed them on the ladder of the
+                separation. Half a difference of unit vectors stays within
+                [-1, 1], where the separation's ladder, matched to
+                coordinate differences, mostly oscillates faster than the
+                difference changes; its own ladder puts every frequency
+                where two sensor orientations can actually differ. Needs
+                `direction_columns`.
+            direction_n_freq: Span of that ladder; `n_freq` if None.
         """
         if pair_features not in ("polar", "cartesian", "differences"):
             raise ValueError(
@@ -576,9 +587,27 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 "separable needs pair_features='differences' and clip=None: "
                 "only an unclipped difference splits into per-step factors"
             )
+        if direction_columns is None and (
+            direction_scale is not None or direction_n_freq is not None
+        ):
+            raise ValueError(
+                "direction_scale and direction_n_freq shape the ladder of the "
+                "direction differences, which needs direction_columns"
+            )
         super().__init__()
         self.separable = separable
         self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        # The ladder and multiplier of the direction differences: their own,
+        # or the separation's.
+        self.direction_emb = self.sin_emb
+        self.direction_scale = scale
+        if direction_scale is not None or direction_n_freq is not None:
+            self.direction_emb = SinusoidalPosEmb(
+                dim=seq_length, n_freq=direction_n_freq or n_freq
+            )
+            self.direction_scale = (
+                scale if direction_scale is None else direction_scale
+            )
         self.columns = columns
         self.time_scale = time_scale
         self.scale = scale
@@ -706,7 +735,9 @@ class DirectionalSpacetimeEncoder(LightningModule):
                 pointing[:, :, None] - pointing[:, None, :]
             )
             ladders += [
-                self.sin_emb(self.scale * half_difference[..., k])
+                self.direction_emb(
+                    self.direction_scale * half_difference[..., k]
+                )
                 for k in range(3)
             ]
         features = torch.cat(ladders, dim=-1)
@@ -726,22 +757,33 @@ class DirectionalSpacetimeEncoder(LightningModule):
         medium: Tensor,
     ) -> Tensor:
         """Compute the `"differences"` form from per-step sines and cosines."""
-        scalars = [pos, speed.view(-1, 1, 1) * time.unsqueeze(-1)]
+        coordinates = torch.cat(
+            [pos, speed.view(-1, 1, 1) * time.unsqueeze(-1)], dim=-1
+        )  # [B, L, 4]
+
+        def ladder_phase(
+            values: Tensor, emb: SinusoidalPosEmb, scale: float
+        ) -> Tensor:
+            # A step's phases reach several thousand radians, where float32
+            # rounding alone is comparable to the phase difference of two
+            # close steps; the bounded sine and cosine are cast back later.
+            return (
+                scale
+                * values.double().unsqueeze(-1)
+                * emb.freqs.double()
+                * emb.scale
+            )
+
+        phases = [ladder_phase(coordinates, self.sin_emb, self.scale)]
         if self.direction_columns is not None:
-            scalars.append(0.5 * x[:, :, list(self.direction_columns)])
-        per_step = torch.cat(scalars, dim=-1)  # [B, L, n]
-        batch, _, n_scalars = per_step.shape
-        freqs = self.sin_emb.freqs
-        half = freqs.numel()
-        # Each step's phases reach several thousand radians, where float32
-        # rounding alone is comparable to the phase difference of two close
-        # steps; the bounded sine and cosine are cast back afterwards.
-        phase = (
-            self.scale
-            * per_step.double().unsqueeze(-1)
-            * freqs.double()
-            * self.sin_emb.scale
-        )
+            directions = 0.5 * x[:, :, list(self.direction_columns)]
+            phases.append(
+                ladder_phase(
+                    directions, self.direction_emb, self.direction_scale
+                )
+            )
+        phase = torch.cat(phases, dim=-2)  # [B, L, n, half]
+        batch, _, n_scalars, half = phase.shape
         sin = torch.sin(phase).to(x.dtype).flatten(-2)  # [B, L, n * half]
         cos = torch.cos(phase).to(x.dtype).flatten(-2)
 
