@@ -198,9 +198,9 @@ def test_distinguishes_orientation_order() -> None:
 
 
 @pytest.mark.parametrize("n_media", [1, 2])
-@pytest.mark.parametrize("pointing", [False, True])
+@pytest.mark.parametrize("pointing", [False, True, "own ladder"])
 def test_separable_matches_the_pair_features(
-    n_media: int, pointing: bool
+    n_media: int, pointing: object
 ) -> None:
     """The per-step factorisation is the same function, gradients included."""
     torch.manual_seed(3)
@@ -212,11 +212,14 @@ def test_separable_matches_the_pair_features(
         n_media=n_media,
         direction_columns=(4, 5, 6) if pointing else None,
     )
+    if pointing == "own ladder":
+        kwargs.update(direction_scale=2.5, direction_n_freq=40.0)
     dense = DirectionalSpacetimeEncoder(**kwargs).double()
     separable = DirectionalSpacetimeEncoder(**kwargs, separable=True).double()
     # The comparison is about the algebra, so both evaluate their phases in
     # the input's precision.
     dense.sin_emb.phase_dtype = None
+    dense.direction_emb.phase_dtype = None
     with torch.no_grad():
         for parameter in dense.parameters():
             parameter.normal_(std=0.3)
@@ -247,3 +250,33 @@ def test_separable_needs_unclipped_differences(kwargs: Dict[str, Any]) -> None:
     arguments: Dict[str, Any] = {"pair_features": "differences", **kwargs}
     with pytest.raises(ValueError, match="separable"):
         DirectionalSpacetimeEncoder(seq_length=8, separable=True, **arguments)
+
+
+def test_direction_ladder_is_its_own() -> None:
+    """The direction differences get their band; the separation keeps its."""
+    shared = DirectionalSpacetimeEncoder(
+        seq_length=8, pair_features="differences", direction_columns=(4, 5, 6)
+    )
+    own = DirectionalSpacetimeEncoder(
+        seq_length=8,
+        pair_features="differences",
+        direction_columns=(4, 5, 6),
+        direction_scale=2.0,
+        direction_n_freq=40.0,
+    )
+    assert shared.direction_emb is shared.sin_emb
+    assert own.direction_emb is not own.sin_emb
+    torch.testing.assert_close(own.sin_emb.freqs, shared.sin_emb.freqs)
+    top = own.direction_scale * own.direction_emb.freqs
+    assert top.max().item() == pytest.approx(2.0)
+    assert top.max().item() / top.min().item() == pytest.approx(
+        40.0 ** (3 / 4)
+    )
+    # The ladder has no parameters, so the state dict does not change.
+    assert set(own.state_dict()) == set(shared.state_dict())
+
+
+def test_direction_ladder_needs_direction_columns() -> None:
+    """Without directions there is nothing for the ladder to embed."""
+    with pytest.raises(ValueError, match="direction_columns"):
+        DirectionalSpacetimeEncoder(seq_length=8, direction_scale=2.0)
