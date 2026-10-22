@@ -17,11 +17,20 @@ HEADS, HEAD_DIM = 2, 16
 LENGTHS = [5, 9, 1]
 
 
-def _modules(directions: bool = False) -> tuple:
+def _modules(directions: object = False) -> tuple:
     torch.manual_seed(0)
     block = Block(HEADS * HEAD_DIM, HEADS, qk_norm=True).double().eval()
+    ladder: Dict[str, Any] = (
+        dict(direction_scale=2.5, direction_n_freq=40.0)
+        if directions == "own ladder"
+        else {}
+    )
     bias = LinearDifferencesBias(
-        HEAD_DIM, seq_length=8, time_scale=3.0, directions=directions
+        HEAD_DIM,
+        seq_length=8,
+        time_scale=3.0,
+        directions=bool(directions),
+        **ladder,
     )
     bias = bias.double()
     with torch.no_grad():
@@ -32,6 +41,7 @@ def _modules(directions: bool = False) -> tuple:
         bias.log_speed.fill_(-0.2)
     # The reference embeds each pair's differences directly, in float64.
     bias.sin_emb.phase_dtype = None
+    bias.direction_emb.phase_dtype = None
     return block, bias
 
 
@@ -60,9 +70,10 @@ def _reference(
         start += n
         difference = per_step[sl, None] - per_step[None, sl]  # [n, n, 4]
         embedded = torch.cat(
-            [
-                bias.sin_emb(bias.scale * difference[..., a])
-                for a in range(difference.shape[-1])
+            [bias.sin_emb(bias.scale * difference[..., a]) for a in range(4)]
+            + [
+                bias.direction_emb(bias.direction_scale * difference[..., a])
+                for a in range(4, difference.shape[-1])
             ],
             -1,
         )
@@ -77,8 +88,8 @@ def _reference(
     return linear(torch.cat(outputs), attn.out_proj.weight, attn.out_proj.bias)
 
 
-@pytest.mark.parametrize("directions", [False, True])
-def test_attention_matches_the_bias_built_per_pair(directions: bool) -> None:
+@pytest.mark.parametrize("directions", [False, True, "own ladder"])
+def test_attention_matches_the_bias_built_per_pair(directions: object) -> None:
     """Widened attention adds exactly the per-pair bias, both sides."""
     block, bias = _modules(directions)
     generator = torch.Generator().manual_seed(1)
