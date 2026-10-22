@@ -48,6 +48,8 @@ class DeepIceLinearBias(GNN):
         fourier_kwargs: Optional[Dict[str, Any]] = None,
         coordinate_features: Optional[Sequence[str]] = None,
         direction_features: Optional[Sequence[str]] = None,
+        direction_scale: Optional[float] = None,
+        direction_n_freq: Optional[float] = None,
         qk_norm: bool = False,
         init_values: Optional[float] = None,
         bias_seq_length: Optional[int] = None,
@@ -81,6 +83,9 @@ class DeepIceLinearBias(GNN):
                 `input_feature_names`. Given, the pair bias also embeds the
                 difference of the two pulses' directions; see
                 `LinearDifferencesBias`.
+            direction_scale: Multiplier before the direction differences'
+                own ladder; see `LinearDifferencesBias`.
+            direction_n_freq: Span of that ladder.
             qk_norm: Per-head RMSNorm on queries and keys, applied before the
                 bias is formed from the query.
             init_values: Initial LayerScale of the blocks, or None for none.
@@ -124,6 +129,8 @@ class DeepIceLinearBias(GNN):
             )
         self.pair_bias = LinearDifferencesBias(
             directions=direction_features is not None,
+            direction_scale=direction_scale,
+            direction_n_freq=direction_n_freq,
             head_dim=head_size,
             seq_length=bias_seq_length or head_size,
             time_scale=bias_time_scale,
