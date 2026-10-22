@@ -662,6 +662,8 @@ class LinearDifferencesBias(LightningModule):
         scale: float = 1024.0,
         n_freq: float = 10000.0,
         directions: bool = False,
+        direction_scale: Optional[float] = None,
+        direction_n_freq: Optional[float] = None,
     ):
         """Construct `LinearDifferencesBias`.
 
@@ -677,7 +679,21 @@ class LinearDifferencesBias(LightningModule):
             n_freq: Span of the frequency ladder.
             directions: Also embed the difference of the steps' sensor
                 pointing directions; `phases` then takes them.
+            direction_scale: Multiplier before a ladder of the direction
+                differences' own, or None to embed them on the coordinates'
+                ladder. Half a difference of unit vectors stays within
+                [-1, 1], where a ladder matched to coordinate differences
+                mostly oscillates faster than the difference changes; see
+                `DirectionalSpacetimeEncoder`. Needs `directions`.
+            direction_n_freq: Span of that ladder; `n_freq` if None.
         """
+        if not directions and (
+            direction_scale is not None or direction_n_freq is not None
+        ):
+            raise ValueError(
+                "direction_scale and direction_n_freq shape the ladder of the "
+                "direction differences, which needs directions=True"
+            )
         super().__init__()
         self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
         self.head_dim = head_dim
@@ -685,6 +701,17 @@ class LinearDifferencesBias(LightningModule):
         self.scale = scale
         self.directions = directions
         self.n_scalars = 7 if directions else 4
+        # The ladder and multiplier of the direction differences: their own,
+        # or the coordinates'.
+        self.direction_emb = self.sin_emb
+        self.direction_scale = scale
+        if direction_scale is not None or direction_n_freq is not None:
+            self.direction_emb = SinusoidalPosEmb(
+                dim=seq_length, n_freq=direction_n_freq or n_freq
+            )
+            self.direction_scale = (
+                scale if direction_scale is None else direction_scale
+            )
         self.log_speed = nn.Parameter(torch.zeros(1))
         self.projection = nn.Linear(self.n_scalars * seq_length, head_dim)
 
@@ -713,21 +740,33 @@ class LinearDifferencesBias(LightningModule):
                 "was built with directions=True"
             )
         speed = self.time_scale * torch.exp(self.log_speed)
-        scalars = [coordinates[:, :3], speed * coordinates[:, 3:4]]
+
+        def ladder_phase(
+            values: Tensor, emb: SinusoidalPosEmb, scale: float
+        ) -> Tensor:
+            # A step's phases reach several thousand radians, where float32
+            # rounding alone is comparable to the phase difference of two
+            # close steps; the bounded sine and cosine are cast back later.
+            return (
+                scale
+                * values.double().unsqueeze(-1)
+                * emb.freqs.double()
+                * emb.scale
+            )
+
+        coords = torch.cat(
+            [coordinates[:, :3], speed * coordinates[:, 3:4]], dim=-1
+        )
+        phases = [ladder_phase(coords, self.sin_emb, self.scale)]
         if directions is not None:
             # Halved into [-1, 1], the range of a direction component, as in
             # `DirectionalSpacetimeEncoder`.
-            scalars.append(0.5 * directions)
-        per_step = torch.cat(scalars, dim=-1)
-        # A step's phases reach several thousand radians, where float32
-        # rounding alone is comparable to the phase difference of two close
-        # steps; the bounded sine and cosine are cast back afterwards.
-        phase = (
-            self.scale
-            * per_step.double().unsqueeze(-1)
-            * self.sin_emb.freqs.double()
-            * self.sin_emb.scale
-        )
+            phases.append(
+                ladder_phase(
+                    0.5 * directions, self.direction_emb, self.direction_scale
+                )
+            )
+        phase = torch.cat(phases, dim=-2)
         return (
             torch.sin(phase).to(coordinates.dtype).flatten(-2),
             torch.cos(phase).to(coordinates.dtype).flatten(-2),
