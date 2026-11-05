@@ -278,6 +278,10 @@ class DeepIce(GNN):
             )
         self.pooling = pooling
         self.n_rel = n_rel
+        self._rel_bias_used = any(
+            blk.attn.use_attn_bias or blk.attn.use_activation_bias
+            for blk in self.sandwich
+        )
         self.rel_attention = rel_attention
         self.q_tile = q_tile
         self.tiled_checkpoint = tiled_checkpoint
@@ -337,7 +341,8 @@ class DeepIce(GNN):
         """Apply the relative-attention stack over padded sequences.
 
         Only the leading `n_rel` blocks receive the spacetime bias. With no
-        relative blocks the O(len^2) bias is never built, as nothing would
+        relative blocks, or blocks that add it neither to the logits nor to
+        the outputs, the O(len^2) bias is never built, as nothing would
         consume it.
         """
         if not self.sandwich:
@@ -352,9 +357,11 @@ class DeepIce(GNN):
                 )
             return x
         tiled = self.rel_attention == "tiled"
-        rel_pos_bias = None if tiled else self.rel_pos(x0)
+        rel_pos_bias = (
+            self.rel_pos(x0) if self._rel_bias_used and not tiled else None
+        )
         for i, blk in enumerate(self.sandwich):
-            if tiled and i < self.n_rel:
+            if tiled and i < self.n_rel and self._rel_bias_used:
                 x = blk.forward_tiled(
                     x,
                     self.rel_pos,
