@@ -102,7 +102,9 @@ class DeepIce(GNN):
             use_attn_bias: Add the spacetime bias to the relative blocks'
                 pre-softmax logits, as `<q_i, R_ij>`.
             use_activation_bias: Add it to their post-softmax output, as
-                `sum_j P_ij R_ij`. Independent of `use_attn_bias`.
+                `sum_j P_ij R_ij`. Independent of `use_attn_bias`, but one
+                of the two is required: attention without the bias belongs
+                in the plain `depth` blocks.
             alibi_bias: Scale the raw signed four-distance by a learned
                 per-head slope instead of embedding it per pair. Being
                 query-independent, the `[L, L]` term is then a closed form of
@@ -278,10 +280,6 @@ class DeepIce(GNN):
             )
         self.pooling = pooling
         self.n_rel = n_rel
-        self._rel_bias_used = any(
-            blk.attn.use_attn_bias or blk.attn.use_activation_bias
-            for blk in self.sandwich
-        )
         self.rel_attention = rel_attention
         self.q_tile = q_tile
         self.tiled_checkpoint = tiled_checkpoint
@@ -341,8 +339,7 @@ class DeepIce(GNN):
         """Apply the relative-attention stack over padded sequences.
 
         Only the leading `n_rel` blocks receive the spacetime bias. With no
-        relative blocks, or blocks that add it neither to the logits nor to
-        the outputs, the O(len^2) bias is never built, as nothing would
+        relative blocks the O(len^2) bias is never built, as nothing would
         consume it.
         """
         if not self.sandwich:
@@ -357,11 +354,9 @@ class DeepIce(GNN):
                 )
             return x
         tiled = self.rel_attention == "tiled"
-        rel_pos_bias = (
-            self.rel_pos(x0) if self._rel_bias_used and not tiled else None
-        )
+        rel_pos_bias = None if tiled else self.rel_pos(x0)
         for i, blk in enumerate(self.sandwich):
-            if tiled and i < self.n_rel and self._rel_bias_used:
+            if tiled and i < self.n_rel:
                 x = blk.forward_tiled(
                     x,
                     self.rel_pos,
