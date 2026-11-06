@@ -102,7 +102,9 @@ class DeepIce(GNN):
             use_attn_bias: Add the spacetime bias to the relative blocks'
                 pre-softmax logits, as `<q_i, R_ij>`.
             use_activation_bias: Add it to their post-softmax output, as
-                `sum_j P_ij R_ij`. Independent of `use_attn_bias`.
+                `sum_j P_ij R_ij`. Independent of `use_attn_bias`, but one
+                of the two is required: attention without the bias belongs
+                in the plain `depth` blocks.
             alibi_bias: Scale the raw signed four-distance by a learned
                 per-head slope instead of embedding it per pair. Being
                 query-independent, the `[L, L]` term is then a closed form of

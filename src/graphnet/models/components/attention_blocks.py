@@ -182,6 +182,14 @@ class Attention_rel(LightningModule):
         self.num_heads = num_heads
         self.use_attn_bias = use_attn_bias
         self.use_activation_bias = use_activation_bias and not alibi
+        if not (self.use_attn_bias or self.use_activation_bias):
+            # Without the bias this is plain attention computed the slow way:
+            # it stores the attention weights over all pairs, which the fused
+            # kernels behind `Block` never build.
+            raise ValueError(
+                "Attention_rel needs use_attn_bias or use_activation_bias; "
+                "for attention without a relative bias use Block"
+            )
         if alibi:
             # A geometric ladder, as in ALiBi: heads span strong to
             # negligible causal priors, so the mechanism cannot dominate every
