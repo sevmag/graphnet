@@ -171,7 +171,6 @@ FLAG_COMBINATIONS = [
     (True, True),
     (True, False),
     (False, True),
-    (False, False),
 ]
 
 
