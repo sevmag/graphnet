@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.functional import Tensor
 
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union, Callable
 
 from pytorch_lightning import LightningModule
 from torch_geometric.utils import add_self_loops
@@ -192,7 +192,15 @@ class FourierEncoderEPJC(LightningModule):
         x: Tensor,
         seq_length: Tensor,
     ) -> Tensor:
-        """Forward pass."""
+        """Forward pass.
+
+        `x` may be a padded sequence [B, L, D] or a jagged `NestedTensor`
+        [B, j, D]. The encoding is per-pulse, so on jagged input it runs on
+        the flat values buffer -- no compute on padding -- and is rewrapped
+        with the input's offsets.
+        """
+        if x.is_nested:
+            return self._forward_jagged(x, seq_length)
         length = torch.log10(seq_length.to(dtype=x.dtype))
         embeddings = [self.sin_emb(4096 * x[:, :, :3]).flatten(-2)]  # Position
 
@@ -212,6 +220,41 @@ class FourierEncoderEPJC(LightningModule):
         x = self.mlp(x)
 
         return x
+
+    def _forward_jagged(self, x: Tensor, seq_length: Tensor) -> Tensor:
+        """Encode a jagged `NestedTensor` on its dense values buffer.
+
+        All compute happens on the flat [total_pulses, D] buffer: jagged
+        eager kernels do not cover every op used here (notably under
+        `torch.inference_mode`), whereas dense ops always work and are
+        mathematically identical because the encoding is per-pulse.
+        """
+        v = x.values()
+        length = torch.log10(seq_length.to(dtype=v.dtype))
+        embeddings = [self.sin_emb(4096 * v[:, :3]).flatten(-2)]  # Position
+
+        if self.n_features >= 5:
+            embeddings.append(self.sin_emb(1024 * v[:, 4]))  # Charge
+
+        embeddings.append(self.sin_emb(4096 * v[:, 3]))  # Time
+
+        if self.n_features >= 6:
+            embeddings.append(self.aux_emb(v[:, 5].long()))  # Auxiliary
+
+        # Each pulse receives its event's length embedding; indexing per
+        # pulse replaces the padded route's expand to the batch-max length.
+        batch_idx = torch.repeat_interleave(
+            torch.arange(seq_length.numel(), device=v.device), seq_length
+        )
+        embeddings.append(self.sin_emb2(length)[batch_idx])  # Length
+
+        out = self.mlp(torch.cat(embeddings, -1))
+        return torch.nested.nested_tensor_from_jagged(
+            out,
+            x.offsets(),
+            min_seqlen=x._get_min_seqlen(),
+            max_seqlen=x._get_max_seqlen(),
+        )
 
 
 class FourierEncoder(LightningModule):
@@ -306,7 +349,8 @@ class FourierEncoder(LightningModule):
         """Apply positional encoding of `x`.
 
         Args:
-            x: `[B, K, D]`-dimensional sequence representation of an event.
+            x: Sequence representation of an event, either padded
+                `[B, K, D]` or a jagged `NestedTensor` `[B, j, D]`.
             seq_length: `[B]`-dimensional unpadded length of each sequence in
                 `x`, one entry per sequence rather than per step. Required
                 when `add_sequence_length` is True, in which case each step
@@ -314,25 +358,65 @@ class FourierEncoder(LightningModule):
                 length.
 
         Returns:
-            Embedded `[B, K, J]`-dimensional sequence.
+            Embedded sequence, `[B, K, J]` or jagged `[B, j, J]` like `x`.
         """
+        if x.is_nested:
+            return self._forward_jagged(x, seq_length)
         embeddings = [
             self.sin_feature[self._span_index[span]](scale * x[:, :, col])
             for col, (scale, span) in self.schema.items()
         ]
 
         if self._add_sequence_length:
-            if seq_length is None:
-                raise ValueError(
-                    "Must pass `seq_length` when `add_sequence_length` is "
-                    "True."
-                )
-            length = torch.log10(seq_length.to(dtype=x.dtype))
             embeddings.append(
-                self.sin_length(length).unsqueeze(1).expand(-1, x.shape[1], -1)
+                self._embed_length(seq_length, x.dtype)
+                .unsqueeze(1)
+                .expand(-1, x.shape[1], -1)
             )
 
         return torch.cat(embeddings, -1)
+
+    def _embed_length(
+        self, seq_length: Optional[Tensor], dtype: torch.dtype
+    ) -> Tensor:
+        """Embed the unpadded length of each sequence, `[B, J/2]`."""
+        if seq_length is None:
+            raise ValueError(
+                "Must pass `seq_length` when `add_sequence_length` is True."
+            )
+        return self.sin_length(torch.log10(seq_length.to(dtype=dtype)))
+
+    def _forward_jagged(
+        self, x: Tensor, seq_length: Optional[Tensor]
+    ) -> Tensor:
+        """Encode a jagged `NestedTensor` on its dense values buffer.
+
+        The encoding is per step, so it runs on the flat `[total_steps, D]`
+        buffer and is rewrapped with the input's offsets: no compute on
+        padding, and dense ops cover what jagged eager kernels do not
+        (notably under `torch.inference_mode`).
+        """
+        v = x.values()
+        embeddings = [
+            self.sin_feature[self._span_index[span]](scale * v[:, col])
+            for col, (scale, span) in self.schema.items()
+        ]
+
+        if self._add_sequence_length:
+            length = self._embed_length(seq_length, v.dtype)
+            assert seq_length is not None
+            # Each step takes its own sequence's length embedding.
+            batch_idx = torch.repeat_interleave(
+                torch.arange(seq_length.numel(), device=v.device), seq_length
+            )
+            embeddings.append(length[batch_idx])
+
+        return torch.nested.nested_tensor_from_jagged(
+            torch.cat(embeddings, -1),
+            x.offsets(),
+            min_seqlen=x._get_min_seqlen(),
+            max_seqlen=x._get_max_seqlen(),
+        )
 
 
 class RoPE4D(LightningModule):
@@ -405,6 +489,8 @@ def signed_four_distance(
     x: Tensor,
     time_scale: float,
     columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+    start: int = 0,
+    end: Optional[int] = None,
 ) -> Tensor:
     """Signed spacetime four-distance between every pair of steps.
 
@@ -416,12 +502,18 @@ def signed_four_distance(
     normalisation produced the features. It is a property of that
     normalisation rather than of the physics, so a value carried over from
     other data silently reduces the interval to a spatial distance.
+
+    `start` and `end` restrict the query axis to one band of rows, giving
+    `[B, end - start, L]` instead of `[B, L, L]`. A caller that consumes the
+    result a band at a time therefore never holds the whole pair matrix; the
+    default covers every row.
     """
     xi, yi, zi, ti = columns
     pos = x[:, :, [xi, yi, zi]]
     time = x[:, :, ti]
-    interval = (pos[:, :, None] - pos[:, None, :]).pow(2).sum(-1) - (
-        (time[:, :, None] - time[:, None, :]) * time_scale
+    rows = slice(start, end)
+    interval = (pos[:, rows, None, :] - pos[:, None, :, :]).pow(2).sum(-1) - (
+        (time[:, rows, None] - time[:, None, :]) * time_scale
     ).pow(2)
     return torch.sign(interval) * torch.sqrt(torch.abs(interval))
 
@@ -458,7 +550,22 @@ class SpacetimeEncoderEPJC(LightningModule):
         x: Tensor,
     ) -> Tensor:
         """Forward pass."""
-        four_distance = signed_four_distance(x, 3e4 / 500 * 3e-1)
+        return self.forward_tiled(x)
+
+    def forward_tiled(
+        self,
+        x: Tensor,
+        start: int = 0,
+        end: Optional[int] = None,
+    ) -> Tensor:
+        """Embed the pairs of one band of query rows.
+
+        Returns `[B, end - start, L, seq_length]`; the default band is every
+        row, which is what `forward` asks for.
+        """
+        four_distance = signed_four_distance(
+            x, 3e4 / 500 * 3e-1, start=start, end=end
+        )
         sin_emb = self.sin_emb(1024 * four_distance.clip(-4, 4))
         rel_attn = self.projection(sin_emb)
         return rel_attn
@@ -516,10 +623,281 @@ class SpacetimeEncoder(LightningModule):
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward pass."""
-        four_distance = signed_four_distance(x, self.time_scale, self.columns)
+        return self.forward_tiled(x)
+
+    def forward_tiled(
+        self,
+        x: Tensor,
+        start: int = 0,
+        end: Optional[int] = None,
+    ) -> Tensor:
+        """Embed the pairs of one band of query rows.
+
+        Returns `[B, end - start, L, output_dim]`; the default band is every
+        row, which is what `forward` asks for.
+        """
+        four_distance = signed_four_distance(
+            x, self.time_scale, self.columns, start, end
+        )
         if self.clip is not None:
             four_distance = four_distance.clip(-self.clip, self.clip)
         return self.projection(self.sin_emb(self.scale * four_distance))
+
+
+class SpacetimeDistance(LightningModule):
+    """Signed spacetime four-distance between every pair of steps.
+
+    The scalar `SpacetimeEncoder` embeds; returned raw (and clipped) rather
+    than embedded, for an ALiBi-style bias that scales it per head instead of
+    projecting it into a per-pair feature vector. Being `[B, L, L]` rather
+    than `[B, L, L, C]` it is `C` times cheaper to hold.
+
+    A positive distance is a spacelike pair -- one that no signal could have
+    connected -- and a negative one is timelike, so a monotone bias in this
+    quantity is a soft causal prior.
+    """
+
+    def __init__(
+        self,
+        clip: float = 4.0,
+        columns: Tuple[int, int, int, int] = (0, 1, 2, 3),
+        time_scale: float = 1.0,
+    ):
+        """Construct `SpacetimeDistance`.
+
+        Args:
+            clip: Bound on the returned distance. The tail is heavy and
+                unbounded, so an unclipped bias would let a few far-separated
+                pairs dominate the attention logits.
+            columns: Input columns holding `(x, y, z, t)`.
+            time_scale: Factor converting the time column into the position
+                columns' length unit; see `SpacetimeEncoder`.
+        """
+        super().__init__()
+        self.clip = clip
+        self.columns = columns
+        self.time_scale = time_scale
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Forward pass."""
+        four_distance = signed_four_distance(x, self.time_scale, self.columns)
+        return four_distance.clip(-self.clip, self.clip)
+
+
+class LinearDifferencesBias(LightningModule):
+    """A pair bias linear in the embedded coordinate differences.
+
+    The bias of a pair of steps is a linear map of the sinusoidal embedding
+    of their signed differences in x, y, z and `c * t`, as in
+    `DirectionalSpacetimeEncoder`'s `"differences"` form without its MLP.
+    Each embedded quantity is the sine or cosine of a difference of
+    per-step phases, which the angle-subtraction identities split into
+    per-step factors,
+
+        sin(a_i - a_j) = sin a_i cos a_j - cos a_i sin a_j,
+        cos(a_i - a_j) = cos a_i cos a_j + sin a_i sin a_j.
+
+    The key-side bias `<q_i, R_ij>` is then a dot product of a per-step
+    vector built from `q_i` and the per-step sines and cosines of step `j`,
+    and the value-side bias `sum_j P_ij R_ij` follows from attending over
+    those sines and cosines. Both therefore ride along in a single call of
+    ordinary scaled-dot-product attention, with the queries, keys and
+    values widened by the per-step factors, and no per-pair tensor is ever
+    formed: memory grows with the number of steps rather than its square,
+    and the fused attention kernels apply.
+
+    The bias is shared by the heads, as in `Attention_rel`, and its
+    arithmetic follows `Attention_rel`'s: the scaled query enters both the
+    content and the bias term. The bias of the projection shifts every
+    logit of a row equally, which the softmax ignores, so only its value
+    side remains.
+
+    With `directions`, the bias also embeds the components of half the
+    difference of the two steps' sensor pointing directions, as
+    `DirectionalSpacetimeEncoder` does: steps on one multi-sensor module
+    share a position, so without them such a pair differs only in time,
+    however the two sensors face. They are differences too, so they split
+    the same way.
+    """
+
+    def __init__(
+        self,
+        head_dim: int,
+        seq_length: int = 32,
+        time_scale: float = 1.0,
+        scale: float = 1024.0,
+        n_freq: float = 10000.0,
+        directions: bool = False,
+        direction_scale: Optional[float] = None,
+        direction_n_freq: Optional[float] = None,
+    ):
+        """Construct `LinearDifferencesBias`.
+
+        Args:
+            head_dim: Width of each attention head, the width of the bias.
+            seq_length: Width of the sinusoidal embedding of each of the four
+                differences.
+            time_scale: Factor converting the time coordinate into the
+                position coordinates' length unit, `t_scale * c / pos_scale`
+                for the normalisation in use. A learnable multiplier on it
+                starts at one.
+            scale: Multiplier applied before the sinusoidal ladder.
+            n_freq: Span of the frequency ladder.
+            directions: Also embed the difference of the steps' sensor
+                pointing directions; `phases` then takes them.
+            direction_scale: Multiplier before a ladder of the direction
+                differences' own, or None to embed them on the coordinates'
+                ladder. Half a difference of unit vectors stays within
+                [-1, 1], where a ladder matched to coordinate differences
+                mostly oscillates faster than the difference changes; see
+                `DirectionalSpacetimeEncoder`. Needs `directions`.
+            direction_n_freq: Span of that ladder; `n_freq` if None.
+        """
+        if not directions and (
+            direction_scale is not None or direction_n_freq is not None
+        ):
+            raise ValueError(
+                "direction_scale and direction_n_freq shape the ladder of the "
+                "direction differences, which needs directions=True"
+            )
+        super().__init__()
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        self.head_dim = head_dim
+        self.time_scale = time_scale
+        self.scale = scale
+        self.directions = directions
+        self.n_scalars = 7 if directions else 4
+        # The ladder and multiplier of the direction differences: their own,
+        # or the coordinates'.
+        self.direction_emb = self.sin_emb
+        self.direction_scale = scale
+        if direction_scale is not None or direction_n_freq is not None:
+            self.direction_emb = SinusoidalPosEmb(
+                dim=seq_length, n_freq=direction_n_freq or n_freq
+            )
+            self.direction_scale = (
+                scale if direction_scale is None else direction_scale
+            )
+        self.log_speed = nn.Parameter(torch.zeros(1))
+        self.projection = nn.Linear(self.n_scalars * seq_length, head_dim)
+
+    @property
+    def n_factors(self) -> int:
+        """Per-step sines (or cosines): embedded scalars times the ladder."""
+        return self.n_scalars * self.sin_emb.freqs.numel()
+
+    def phases(
+        self, coordinates: Tensor, directions: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Tensor]:
+        """Per-step sines and cosines of the ladder phases.
+
+        Args:
+            coordinates: `(x, y, z, t)` of each step, shape `[steps, 4]`.
+            directions: Each step's sensor pointing direction as a unit
+                vector, shape `[steps, 3]`; required with `directions`.
+
+        Returns:
+            Sines and cosines, each `[steps, n_factors]`, laid out scalar by
+            scalar.
+        """
+        if (directions is not None) != self.directions:
+            raise ValueError(
+                "phases takes the steps' directions exactly when the bias "
+                "was built with directions=True"
+            )
+        speed = self.time_scale * torch.exp(self.log_speed)
+
+        def ladder_phase(
+            values: Tensor, emb: SinusoidalPosEmb, scale: float
+        ) -> Tensor:
+            # A step's phases reach several thousand radians, where float32
+            # rounding alone is comparable to the phase difference of two
+            # close steps; the bounded sine and cosine are cast back later.
+            return (
+                scale
+                * values.double().unsqueeze(-1)
+                * emb.freqs.double()
+                * emb.scale
+            )
+
+        coords = torch.cat(
+            [coordinates[:, :3], speed * coordinates[:, 3:4]], dim=-1
+        )
+        phases = [ladder_phase(coords, self.sin_emb, self.scale)]
+        if directions is not None:
+            # Halved into [-1, 1], the range of a direction component, as in
+            # `DirectionalSpacetimeEncoder`.
+            phases.append(
+                ladder_phase(
+                    0.5 * directions, self.direction_emb, self.direction_scale
+                )
+            )
+        phase = torch.cat(phases, dim=-2)
+        return (
+            torch.sin(phase).to(coordinates.dtype).flatten(-2),
+            torch.cos(phase).to(coordinates.dtype).flatten(-2),
+        )
+
+    def _weights(self) -> Tuple[Tensor, Tensor]:
+        """Projection weights acting on the sines and on the cosines."""
+        half = self.sin_emb.freqs.numel()
+        weight = self.projection.weight.view(
+            self.head_dim, self.n_scalars, 2, half
+        )
+        return weight[:, :, 0].flatten(-2), weight[:, :, 1].flatten(-2)
+
+    def extend(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        sin: Tensor,
+        cos: Tensor,
+    ) -> Tuple[Tensor, Tensor, Tensor, Callable[[Tensor], Tensor]]:
+        """Widen queries, keys and values so attention carries the bias.
+
+        Args:
+            q: Queries, `[steps, heads, head_dim]`, unscaled.
+            k: Keys, `[steps, heads, head_dim]`.
+            v: Values, `[steps, heads, head_dim]`.
+            sin: Per-step sines from `phases`.
+            cos: Per-step cosines from `phases`.
+
+        Returns:
+            Widened queries, keys and values, to be attended over with a
+            softmax scale of one, and the map from that attention's output
+            back to `[steps, heads, head_dim]`.
+        """
+        w_sin, w_cos = self._weights()
+        q = q * self.head_dim**-0.5
+        u_sin, u_cos = q @ w_sin, q @ w_cos  # [steps, heads, n_factors]
+        s, c = sin.unsqueeze(1), cos.unsqueeze(1)
+        heads = q.shape[1]
+        q_wide = torch.cat(
+            [q, u_sin * s + u_cos * c, u_cos * s - u_sin * c], -1
+        )
+        k_wide = torch.cat(
+            [k, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
+        )
+        v_wide = torch.cat(
+            [v, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
+        )
+        n = self.n_factors
+
+        def fold(out: Tensor) -> Tensor:
+            mean_cos = out[..., self.head_dim : self.head_dim + n]
+            mean_sin = out[..., self.head_dim + n :]
+            # Attention-weighted sums of sin and cos of the pair phases.
+            pair_sin = s * mean_cos - c * mean_sin
+            pair_cos = c * mean_cos + s * mean_sin
+            return (
+                out[..., : self.head_dim]
+                + pair_sin @ w_sin.T
+                + pair_cos @ w_cos.T
+                + self.projection.bias
+            )
+
+        return q_wide, k_wide, v_wide, fold
 
 
 class RRWPLinearNodeEncoder(LightningModule):
