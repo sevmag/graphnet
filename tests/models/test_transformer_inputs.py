@@ -165,14 +165,18 @@ def test_rope_schema_reproduces_epjc() -> None:
         torch.testing.assert_close(schema(batch), epjc(batch))
 
 
-def test_deepice_follows_named_columns() -> None:
+@pytest.mark.parametrize("rel_pos_encoder", ["epjc", "directional"])
+def test_deepice_follows_named_columns(rel_pos_encoder: str) -> None:
     """Reordered input, named accordingly, gives the same event vector."""
     order = ["q", "t", "z", "y", "x"]
     batch = _batch()
     reference = _deepice(
-        fourier_schema=KAGGLE_SCHEMA, input_feature_names=KAGGLE_NAMES
+        rel_pos_encoder=rel_pos_encoder,
+        fourier_schema=KAGGLE_SCHEMA,
+        input_feature_names=KAGGLE_NAMES,
     )
     reordered = _deepice(
+        rel_pos_encoder=rel_pos_encoder,
         fourier_schema=KAGGLE_SCHEMA,
         input_feature_names=order,
         spacetime_features=COORDINATES,

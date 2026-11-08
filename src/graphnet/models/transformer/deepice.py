@@ -16,6 +16,7 @@ from graphnet.models.components.attention_blocks import (
     Block,
 )
 from graphnet.models.components.embedding import (
+    DirectionalSpacetimeEncoder,
     SpacetimeDistance,
     SpacetimeEncoder,
 )
@@ -50,6 +51,9 @@ class DeepIce(GNN):
         include_dynedge: bool = False,
         dynedge_args: Optional[Dict[str, Any]] = None,
         n_features: int = 6,
+        rel_pos_encoder: str = "epjc",
+        rel_pos_kwargs: Optional[Dict[str, Any]] = None,
+        medium_key: Optional[str] = None,
         use_nested_attention: bool = False,
         qk_norm: bool = False,
         rel_qk_norm: bool = False,
@@ -90,6 +94,18 @@ class DeepIce(GNN):
                 Competition settings. If `include_dynedge` is False, this
                 argument have no impact.
             n_features: The number of features in the input data.
+            rel_pos_encoder: The pairwise encoder feeding the relative
+                attention blocks. "epjc" embeds the spacetime interval of
+                each pair, as in the EPJ-C publication, through a
+                `SpacetimeEncoder` whose `spacetime_*` arguments default to
+                the publication's constants. "directional" embeds range,
+                time difference, interval and direction separately; see
+                `DirectionalSpacetimeEncoder`.
+            rel_pos_kwargs: Arguments for the directional encoder, on top of
+                `seq_length=head_size` and the `spacetime_*` arguments.
+            medium_key: Graph attribute holding each event's medium index,
+                for a directional encoder built with `n_media > 1`. Without
+                it every event is treated as medium 0.
             use_nested_attention: Run the plain blocks on jagged
                 `NestedTensor`s, dropping all compute on padding. The
                 relative blocks are unaffected: their bias needs padding.
@@ -108,7 +124,8 @@ class DeepIce(GNN):
                 per-head slope instead of embedding it per pair. Being
                 query-independent, the `[L, L]` term is then a closed form of
                 the coordinates rather than an `[L, L, C]` tensor. Disables
-                the activation bias, which has no scalar analogue.
+                the activation bias, which has no scalar analogue. Only with
+                `rel_pos_encoder="epjc"`.
             spacetime_time_scale: `t_scale * c / pos_scale` for the
                 `Detector` in use. The default is the IceCube value; pass 1.0
                 with `NuBenchSpacetimeDetector`.
@@ -130,11 +147,14 @@ class DeepIce(GNN):
                 bias. `"dense"` materialises the whole `[B, L, L, C]` tensor;
                 `"tiled"` builds it one band of query rows at a time, which
                 bounds peak memory at `q_tile * L` without changing the
-                result. `"flash"` runs a fused Triton kernel that never
-                materialises the pair tensor at all and consumes the
-                sequence packed rather than padded; it requires a GPU and
-                reproduces the spacetime encoder's shipped constants only. Note that tiling bounds memory, not compute: the
-                padded pairs are still formed and then masked.
+                result. Note that tiling bounds memory, not compute: the
+                padded pairs are still formed and then masked. `"flash"`
+                runs a fused Triton kernel that rebuilds the pair features
+                inside each attention tile, so the tensor never exists. The
+                three are the same function. The kernel has the EPJC
+                spacetime band compiled in, so `"flash"` needs the
+                `flash_spacetime` package, a GPU, `rel_pos_encoder="epjc"`
+                on the default `spacetime_*` values and no `alibi_bias`.
             q_tile: Query rows per band when `rel_attention="tiled"`.
             tiled_checkpoint: Recompute each band in the backward pass. Without
                 it autograd retains every band, which sums to the dense tensor
@@ -163,6 +183,11 @@ class DeepIce(GNN):
                 columns the spacetime bias takes its interval from. Unset,
                 they are columns 0-3.
         """
+        if rel_attention not in ("dense", "tiled", "flash"):
+            raise ValueError(
+                f"rel_attention must be 'dense', 'tiled' or 'flash', "
+                f"got {rel_attention!r}"
+            )
         super().__init__(seq_length, hidden_dim)
         fourier_out_dim = hidden_dim // 2 if include_dynedge else hidden_dim
         self.fourier_ext, self.fourier_mlp = build_fourier_tokenizer(
@@ -181,66 +206,77 @@ class DeepIce(GNN):
             "spacetime_features",
             default=(0, 1, 2, 3),
         )
-        if rel_attention not in ("dense", "tiled", "flash"):
-            raise ValueError(
-                f"rel_attention must be 'dense', 'tiled' or "
-                f"'flash', got {rel_attention!r}"
-            )
-        if rel_attention == "flash":
-            # Optional dependency: only the flash path needs the package, so
-            # every other configuration must stay importable without it.
-            from flash_spacetime import (
-                SINEMB_CLIP,
-                SINEMB_INPUT_SCALE,
-                SINEMB_N_FREQ,
-                TIME_SCALE,
-            )
-
-            # The kernel rebuilds the pair angle from raw coordinates with
-            # the band compiled in, so a model configured for a different
-            # band would train against a bias it never asked for.
-            baked = {
-                "spacetime_time_scale": (spacetime_time_scale, TIME_SCALE),
-                "spacetime_scale": (spacetime_scale, SINEMB_INPUT_SCALE),
-                "spacetime_clip": (spacetime_clip, SINEMB_CLIP),
-                "spacetime_n_freq": (spacetime_n_freq, SINEMB_N_FREQ),
-            }
-            off = {
-                name: got for name, (got, want) in baked.items() if got != want
-            }
-            if off or alibi_bias:
+        self.rel_pos: nn.Module
+        if rel_pos_encoder == "epjc":
+            if rel_pos_kwargs or medium_key is not None:
                 raise ValueError(
-                    "rel_attention='flash' compiles the spacetime band in, "
-                    f"so it needs the shipped values and no alibi_bias; got "
-                    f"{off or 'alibi_bias=True'}"
+                    "rel_pos_kwargs and medium_key apply only to the "
+                    "directional encoder"
                 )
+            self.rel_pos = (
+                SpacetimeDistance(
+                    clip=spacetime_clip,
+                    columns=spacetime_columns,
+                    time_scale=spacetime_time_scale,
+                )
+                if alibi_bias
+                else SpacetimeEncoder(
+                    head_size,
+                    columns=spacetime_columns,
+                    time_scale=spacetime_time_scale,
+                    scale=spacetime_scale,
+                    clip=spacetime_clip,
+                    n_freq=spacetime_n_freq,
+                )
+            )
+        elif rel_pos_encoder == "directional":
+            if alibi_bias:
+                raise ValueError(
+                    "alibi_bias reads a scalar per pair; the directional "
+                    "encoder produces a feature vector"
+                )
+            self.rel_pos = DirectionalSpacetimeEncoder(
+                **{
+                    "seq_length": head_size,
+                    "columns": spacetime_columns,
+                    "time_scale": spacetime_time_scale,
+                    "scale": spacetime_scale,
+                    "clip": spacetime_clip,
+                    "n_freq": spacetime_n_freq,
+                    **(rel_pos_kwargs or {}),
+                }
+            )
+        else:
+            raise ValueError(
+                f"Unknown rel_pos_encoder {rel_pos_encoder!r}; expected "
+                "'epjc' or 'directional'"
+            )
+        self.medium_key = medium_key
+        if rel_attention == "tiled" and rel_pos_encoder != "epjc":
+            raise ValueError(
+                "rel_attention='tiled' needs an encoder with forward_tiled; "
+                "the directional encoder has none"
+            )
+        if rel_attention == "tiled" and alibi_bias:
+            # The tiled path contracts a per-pair feature vector with the
+            # query; ALiBi's bias is a scalar per pair and is consumed by
+            # a different code path, so the two cannot be combined.
+            raise ValueError("rel_attention='tiled' cannot use alibi_bias")
+        if rel_attention == "flash":
             if spacetime_columns != (0, 1, 2, 3):
                 raise ValueError(
                     "rel_attention='flash' reads (x, y, z, t) from columns "
                     f"0-3, but spacetime_features puts them at "
                     f"{spacetime_columns}"
                 )
-        if rel_attention == "tiled" and alibi_bias:
-            # The tiled path contracts a per-pair feature vector with the
-            # query; ALiBi's bias is a scalar per pair and is consumed by
-            # a different code path, so the two cannot be combined.
-            raise ValueError("rel_attention='tiled' cannot use alibi_bias")
-        self.rel_pos: nn.Module = (
-            SpacetimeDistance(
-                clip=spacetime_clip,
-                columns=spacetime_columns,
-                time_scale=spacetime_time_scale,
+            self._check_flash_config(
+                rel_pos_encoder,
+                alibi_bias,
+                spacetime_time_scale=spacetime_time_scale,
+                spacetime_scale=spacetime_scale,
+                spacetime_clip=spacetime_clip,
+                spacetime_n_freq=spacetime_n_freq,
             )
-            if alibi_bias
-            else SpacetimeEncoder(
-                head_size,
-                columns=spacetime_columns,
-                time_scale=spacetime_time_scale,
-                scale=spacetime_scale,
-                clip=spacetime_clip,
-                n_freq=spacetime_n_freq,
-            )
-        )
         self.sandwich = nn.ModuleList(
             [
                 Block_rel(
@@ -274,9 +310,6 @@ class DeepIce(GNN):
             )
         self.pooling = pooling
         self.n_rel = n_rel
-        self.rel_attention = rel_attention
-        self.q_tile = q_tile
-        self.tiled_checkpoint = tiled_checkpoint
 
         if include_dynedge and dynedge_args is None:
             self.warning_once("Running with default DynEdge settings")
@@ -299,6 +332,9 @@ class DeepIce(GNN):
             self.dyn_edge = DynEdge(**dynedge_args)
 
         self.include_dynedge = include_dynedge
+        self.rel_attention = rel_attention
+        self.q_tile = q_tile
+        self.tiled_checkpoint = tiled_checkpoint
         self.use_nested_attention = use_nested_attention
         self._blocks_fn: Callable[..., Tensor] = self._run_blocks
         if compile_blocks:
@@ -316,6 +352,49 @@ class DeepIce(GNN):
         return {"cls_token"}
 
     @staticmethod
+    def _check_flash_config(
+        rel_pos_encoder: str, alibi_bias: bool, **band: float
+    ) -> None:
+        """Refuse a flash configuration the fused kernel cannot reproduce.
+
+        The kernel rebuilds the EPJC pair embedding from the raw coordinates
+        with the spacetime band compiled in, so a model built on another
+        encoder or band would train against a bias it never asked for.
+        `band` holds the `spacetime_*` constructor arguments by name.
+        """
+        if rel_pos_encoder != "epjc" or alibi_bias:
+            raise ValueError(
+                "rel_attention='flash' rebuilds the EPJC per-pair embedding "
+                "inside the kernel, so it needs rel_pos_encoder='epjc' and "
+                "no alibi_bias"
+            )
+        # Optional dependency: only the flash path needs the package, so
+        # every other configuration must stay buildable without it.
+        try:
+            from flash_spacetime import (
+                SINEMB_CLIP,
+                SINEMB_INPUT_SCALE,
+                SINEMB_N_FREQ,
+                TIME_SCALE,
+            )
+        except ImportError as err:
+            raise ImportError(
+                "rel_attention='flash' needs the flash_spacetime package"
+            ) from err
+        shipped = {
+            "spacetime_time_scale": TIME_SCALE,
+            "spacetime_scale": SINEMB_INPUT_SCALE,
+            "spacetime_clip": SINEMB_CLIP,
+            "spacetime_n_freq": SINEMB_N_FREQ,
+        }
+        off = {name: got for name, got in band.items() if got != shipped[name]}
+        if off:
+            raise ValueError(
+                "rel_attention='flash' compiles the spacetime band in, so it "
+                f"needs the shipped values {shipped}; got {off}"
+            )
+
+    @staticmethod
     def _additive_mask(keep: Tensor, dtype: torch.dtype) -> Tensor:
         """Turn a boolean keep-mask into the additive mask attention takes.
 
@@ -328,13 +407,20 @@ class DeepIce(GNN):
         return attn_mask
 
     def _run_rel_blocks(
-        self, x: Tensor, x0: Tensor, attn_mask: Tensor, seq_length: Tensor
+        self,
+        x: Tensor,
+        x0: Tensor,
+        attn_mask: Tensor,
+        seq_length: Tensor,
+        medium: Optional[Tensor] = None,
     ) -> Tensor:
         """Apply the relative-attention stack over padded sequences.
 
         Only the leading `n_rel` blocks receive the spacetime bias. With no
         relative blocks the O(len^2) bias is never built, as nothing would
-        consume it.
+        consume it. `seq_length` holds each event's unpadded length, read
+        only by the flash path; `medium` is each event's medium index, read
+        only by the directional encoder.
         """
         if not self.sandwich:
             return x
@@ -348,7 +434,13 @@ class DeepIce(GNN):
                 )
             return x
         tiled = self.rel_attention == "tiled"
-        rel_pos_bias = None if tiled else self.rel_pos(x0)
+        if tiled:
+            # the relative blocks build the bias one query tile at a time
+            rel_pos_bias = None
+        elif isinstance(self.rel_pos, DirectionalSpacetimeEncoder):
+            rel_pos_bias = self.rel_pos(x0, medium)
+        else:
+            rel_pos_bias = self.rel_pos(x0)
         for i, blk in enumerate(self.sandwich):
             if tiled and i < self.n_rel:
                 x = blk.forward_tiled(
@@ -458,8 +550,13 @@ class DeepIce(GNN):
             graph, _ = to_dense_batch(self.dyn_edge(data), data.batch)
             x = torch.cat([x, graph], 2)
 
+        medium = (
+            data[self.medium_key].reshape(-1).long()
+            if self.medium_key is not None
+            else None
+        )
         x = self._run_rel_blocks(
-            x, x0, self._additive_mask(mask, x.dtype), seq_length
+            x, x0, self._additive_mask(mask, x.dtype), seq_length, medium
         )
 
         if self.use_nested_attention:

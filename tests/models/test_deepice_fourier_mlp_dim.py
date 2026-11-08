@@ -59,6 +59,7 @@ def test_default_is_the_concatenation_width() -> None:
     epjc = _model()
     assert epjc.fourier_ext.mlp[0].out_features == CONCAT_DIM
     schema = _model(fourier_schema=SCHEMA, input_feature_names=NAMES)
+    assert schema.fourier_mlp is not None
     assert schema.fourier_mlp[0].out_features == schema.fourier_ext.output_dim
 
 

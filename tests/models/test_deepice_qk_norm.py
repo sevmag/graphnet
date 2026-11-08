@@ -1,5 +1,7 @@
 """Tests for QK normalisation in DeepIce's relative-attention blocks."""
 
+from typing import Any, Dict
+
 import pytest
 import torch
 
@@ -38,7 +40,9 @@ def test_normalised_attention_ignores_the_projection_scale() -> None:
 
 def test_rel_qk_norm_adds_parameters_to_the_relative_blocks_only() -> None:
     """Unset, the model keeps its parameters, so its checkpoints load."""
-    kwargs = dict(hidden_dim=64, seq_length=32, depth=1, head_size=16)
+    kwargs: Dict[str, Any] = dict(
+        hidden_dim=64, seq_length=32, depth=1, head_size=16
+    )
     plain = set(DeepIce(depth_rel=2, **kwargs).state_dict())
     normed = set(DeepIce(depth_rel=2, rel_qk_norm=True, **kwargs).state_dict())
     assert plain < normed

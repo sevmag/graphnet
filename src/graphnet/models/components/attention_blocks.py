@@ -14,6 +14,7 @@ from torch.nn.functional import linear, scaled_dot_product_attention
 from pytorch_lightning import LightningModule
 
 from graphnet.models.components.embedding import RoPE4D
+
 if TYPE_CHECKING:
     from graphnet.models.components.embedding import (
         LinearDifferencesBias,
