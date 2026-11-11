@@ -714,7 +714,9 @@ class LinearDifferencesBias(LightningModule):
 
     Without `value_bias` the bias enters the logits only. The values then
     keep their width, which halves the extra attention work, and the
-    projection has no bias, as it would only shift the logits.
+    projection has no bias, as it would only shift the logits. Without
+    `logit_bias` it enters the attention output only, and the queries and
+    keys keep their width instead.
 
     With `directions`, the bias also embeds the components of half the
     difference of the two steps' sensor pointing directions, as
@@ -735,6 +737,7 @@ class LinearDifferencesBias(LightningModule):
         direction_scale: Optional[float] = None,
         direction_n_freq: Optional[float] = None,
         value_bias: bool = True,
+        logit_bias: bool = True,
     ):
         """Construct `LinearDifferencesBias`.
 
@@ -760,7 +763,15 @@ class LinearDifferencesBias(LightningModule):
             value_bias: Also add the attention-weighted bias to the
                 attention output (`sum_j P_ij R_ij`), not only `<q_i, R_ij>`
                 to the logits.
+            logit_bias: Add `<q_i, R_ij>` to the logits. At least one of the
+                two is required: attention without the bias belongs in a
+                plain block.
         """
+        if not (value_bias or logit_bias):
+            raise ValueError(
+                "LinearDifferencesBias needs value_bias or logit_bias; for "
+                "attention without a pair bias use Block"
+            )
         if not directions and (
             direction_scale is not None or direction_n_freq is not None
         ):
@@ -788,6 +799,7 @@ class LinearDifferencesBias(LightningModule):
             )
         self.log_speed = nn.Parameter(torch.zeros(1))
         self.value_bias = value_bias
+        self.logit_bias = logit_bias
         self.projection = nn.Linear(
             self.n_scalars * seq_length, head_dim, bias=value_bias
         )
@@ -881,15 +893,17 @@ class LinearDifferencesBias(LightningModule):
         """
         w_sin, w_cos = self._weights()
         q = q * self.head_dim**-0.5
-        u_sin, u_cos = q @ w_sin, q @ w_cos  # [steps, heads, n_factors]
         s, c = sin.unsqueeze(1), cos.unsqueeze(1)
         heads = q.shape[1]
-        q_wide = torch.cat(
-            [q, u_sin * s + u_cos * c, u_cos * s - u_sin * c], -1
-        )
-        k_wide = torch.cat(
-            [k, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
-        )
+        q_wide, k_wide = q, k
+        if self.logit_bias:
+            u_sin, u_cos = q @ w_sin, q @ w_cos  # [steps, heads, n_factors]
+            q_wide = torch.cat(
+                [q, u_sin * s + u_cos * c, u_cos * s - u_sin * c], -1
+            )
+            k_wide = torch.cat(
+                [k, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
+            )
         if not self.value_bias:
             return q_wide, k_wide, v, lambda out: out
         v_wide = torch.cat(
