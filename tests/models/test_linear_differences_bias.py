@@ -17,7 +17,11 @@ HEADS, HEAD_DIM = 2, 16
 LENGTHS = [5, 9, 1]
 
 
-def _modules(directions: object = False, value_bias: bool = True) -> tuple:
+def _modules(
+    directions: object = False,
+    value_bias: bool = True,
+    logit_bias: bool = True,
+) -> tuple:
     torch.manual_seed(0)
     block = Block(HEADS * HEAD_DIM, HEADS, qk_norm=True).double().eval()
     ladder: Dict[str, Any] = (
@@ -31,6 +35,7 @@ def _modules(directions: object = False, value_bias: bool = True) -> tuple:
         time_scale=3.0,
         directions=bool(directions),
         value_bias=value_bias,
+        logit_bias=logit_bias,
         **ladder,
     )
     bias = bias.double()
@@ -82,7 +87,8 @@ def _reference(
         pair = bias.projection(embedded)  # [n, n, C]
         qs = q[sl] * HEAD_DIM**-0.5
         logits = torch.einsum("ihc,jhc->hij", qs, k[sl])
-        logits = logits + torch.einsum("ihc,ijc->hij", qs, pair)
+        if bias.logit_bias:
+            logits = logits + torch.einsum("ihc,ijc->hij", qs, pair)
         p = logits.softmax(-1)
         out = torch.einsum("hij,jhc->ihc", p, v[sl])
         if bias.value_bias:
@@ -92,14 +98,20 @@ def _reference(
 
 
 @pytest.mark.parametrize(
-    "directions, value_bias",
-    [(False, True), (True, True), ("own ladder", True), (True, False)],
+    "directions, value_bias, logit_bias",
+    [
+        (False, True, True),
+        (True, True, True),
+        ("own ladder", True, True),
+        (True, False, True),
+        (True, True, False),
+    ],
 )
 def test_attention_matches_the_bias_built_per_pair(
-    directions: object, value_bias: bool
+    directions: object, value_bias: bool, logit_bias: bool
 ) -> None:
     """Widened attention adds exactly the per-pair bias, on each side."""
-    block, bias = _modules(directions, value_bias)
+    block, bias = _modules(directions, value_bias, logit_bias)
     generator = torch.Generator().manual_seed(1)
     n = sum(LENGTHS)
     x = torch.randn(
@@ -202,3 +214,23 @@ def test_logit_only_bias_keeps_the_values_narrow() -> None:
     assert v_wide.shape[-1] == HEAD_DIM
     assert bias.projection.bias is None
     assert fold(v_wide) is v_wide
+
+
+def test_value_only_bias_keeps_queries_and_keys_narrow() -> None:
+    """Without the logit side, queries and keys stay at head width."""
+    _, bias = _modules(True, logit_bias=False)
+    n = 4
+    q = torch.randn(n, HEADS, HEAD_DIM, dtype=torch.double)
+    sin, cos = bias.phases(
+        torch.randn(n, 4, dtype=torch.double),
+        torch.nn.functional.normalize(torch.randn(n, 3, dtype=torch.double)),
+    )
+    q_wide, k_wide, v_wide, _ = bias.extend(q, q, q, sin, cos)
+    assert q_wide.shape[-1] == k_wide.shape[-1] == HEAD_DIM
+    assert v_wide.shape[-1] == HEAD_DIM + 2 * bias.n_factors
+
+
+def test_a_bias_with_neither_side_is_rejected() -> None:
+    """Attention without a pair bias belongs in a plain block."""
+    with pytest.raises(ValueError, match="use Block"):
+        LinearDifferencesBias(HEAD_DIM, value_bias=False, logit_bias=False)
