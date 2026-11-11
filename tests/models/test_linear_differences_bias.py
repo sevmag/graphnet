@@ -17,7 +17,7 @@ HEADS, HEAD_DIM = 2, 16
 LENGTHS = [5, 9, 1]
 
 
-def _modules(directions: object = False) -> tuple:
+def _modules(directions: object = False, value_bias: bool = True) -> tuple:
     torch.manual_seed(0)
     block = Block(HEADS * HEAD_DIM, HEADS, qk_norm=True).double().eval()
     ladder: Dict[str, Any] = (
@@ -30,6 +30,7 @@ def _modules(directions: object = False) -> tuple:
         seq_length=8,
         time_scale=3.0,
         directions=bool(directions),
+        value_bias=value_bias,
         **ladder,
     )
     bias = bias.double()
@@ -37,7 +38,8 @@ def _modules(directions: object = False) -> tuple:
         block.q_norm.weight.uniform_(0.5, 1.5)
         block.k_norm.weight.uniform_(0.5, 1.5)
         bias.projection.weight.normal_(std=0.3)
-        bias.projection.bias.normal_(std=0.3)
+        if bias.projection.bias is not None:
+            bias.projection.bias.normal_(std=0.3)
         bias.log_speed.fill_(-0.2)
     # The reference embeds each pair's differences directly, in float64.
     bias.sin_emb.phase_dtype = None
@@ -83,15 +85,21 @@ def _reference(
         logits = logits + torch.einsum("ihc,ijc->hij", qs, pair)
         p = logits.softmax(-1)
         out = torch.einsum("hij,jhc->ihc", p, v[sl])
-        out = out + torch.einsum("hij,ijc->ihc", p, pair)
+        if bias.value_bias:
+            out = out + torch.einsum("hij,ijc->ihc", p, pair)
         outputs.append(out.reshape(n, -1))
     return linear(torch.cat(outputs), attn.out_proj.weight, attn.out_proj.bias)
 
 
-@pytest.mark.parametrize("directions", [False, True, "own ladder"])
-def test_attention_matches_the_bias_built_per_pair(directions: object) -> None:
-    """Widened attention adds exactly the per-pair bias, both sides."""
-    block, bias = _modules(directions)
+@pytest.mark.parametrize(
+    "directions, value_bias",
+    [(False, True), (True, True), ("own ladder", True), (True, False)],
+)
+def test_attention_matches_the_bias_built_per_pair(
+    directions: object, value_bias: bool
+) -> None:
+    """Widened attention adds exactly the per-pair bias, on each side."""
+    block, bias = _modules(directions, value_bias)
     generator = torch.Generator().manual_seed(1)
     n = sum(LENGTHS)
     x = torch.randn(
@@ -176,3 +184,21 @@ def test_model_embeds_named_sensor_directions() -> None:
     batch = Batch.from_data_list([Data(x=torch.randn(n, 8)) for n in (4, 9)])
     with torch.no_grad():
         assert torch.isfinite(pointing(batch)).all()
+
+
+def test_logit_only_bias_keeps_the_values_narrow() -> None:
+    """Without the value side, the values are attended over at head width."""
+    _, bias = _modules(True, value_bias=False)
+    n = 4
+    q = torch.randn(n, HEADS, HEAD_DIM, dtype=torch.double)
+    sin, cos = bias.phases(
+        torch.randn(n, 4, dtype=torch.double),
+        torch.nn.functional.normalize(torch.randn(n, 3, dtype=torch.double)),
+    )
+    q_wide, k_wide, v_wide, fold = bias.extend(q, q, q, sin, cos)
+    assert (
+        q_wide.shape[-1] == k_wide.shape[-1] == HEAD_DIM + 2 * bias.n_factors
+    )
+    assert v_wide.shape[-1] == HEAD_DIM
+    assert bias.projection.bias is None
+    assert fold(v_wide) is v_wide

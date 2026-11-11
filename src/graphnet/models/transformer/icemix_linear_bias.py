@@ -50,6 +50,7 @@ class DeepIceLinearBias(GNN):
         direction_features: Optional[Sequence[str]] = None,
         direction_scale: Optional[float] = None,
         direction_n_freq: Optional[float] = None,
+        value_bias: bool = True,
         qk_norm: bool = False,
         init_values: Optional[float] = None,
         bias_seq_length: Optional[int] = None,
@@ -86,6 +87,8 @@ class DeepIceLinearBias(GNN):
             direction_scale: Multiplier before the direction differences'
                 own ladder; see `LinearDifferencesBias`.
             direction_n_freq: Span of that ladder.
+            value_bias: Add the bias to the attention output as well as the
+                logits; see `LinearDifferencesBias`.
             qk_norm: Per-head RMSNorm on queries and keys, applied before the
                 bias is formed from the query.
             init_values: Initial LayerScale of the blocks, or None for none.
@@ -131,6 +134,7 @@ class DeepIceLinearBias(GNN):
             directions=direction_features is not None,
             direction_scale=direction_scale,
             direction_n_freq=direction_n_freq,
+            value_bias=value_bias,
             head_dim=head_size,
             seq_length=bias_seq_length or head_size,
             time_scale=bias_time_scale,

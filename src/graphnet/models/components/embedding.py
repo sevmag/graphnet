@@ -1071,6 +1071,10 @@ class LinearDifferencesBias(LightningModule):
     logit of a row equally, which the softmax ignores, so only its value
     side remains.
 
+    Without `value_bias` the bias enters the logits only. The values then
+    keep their width, which halves the extra attention work, and the
+    projection has no bias, as it would only shift the logits.
+
     With `directions`, the bias also embeds the components of half the
     difference of the two steps' sensor pointing directions, as
     `DirectionalSpacetimeEncoder` does: steps on one multi-sensor module
@@ -1089,6 +1093,7 @@ class LinearDifferencesBias(LightningModule):
         directions: bool = False,
         direction_scale: Optional[float] = None,
         direction_n_freq: Optional[float] = None,
+        value_bias: bool = True,
     ):
         """Construct `LinearDifferencesBias`.
 
@@ -1111,6 +1116,9 @@ class LinearDifferencesBias(LightningModule):
                 mostly oscillates faster than the difference changes; see
                 `DirectionalSpacetimeEncoder`. Needs `directions`.
             direction_n_freq: Span of that ladder; `n_freq` if None.
+            value_bias: Also add the attention-weighted bias to the
+                attention output (`sum_j P_ij R_ij`), not only `<q_i, R_ij>`
+                to the logits.
         """
         if not directions and (
             direction_scale is not None or direction_n_freq is not None
@@ -1138,7 +1146,10 @@ class LinearDifferencesBias(LightningModule):
                 scale if direction_scale is None else direction_scale
             )
         self.log_speed = nn.Parameter(torch.zeros(1))
-        self.projection = nn.Linear(self.n_scalars * seq_length, head_dim)
+        self.value_bias = value_bias
+        self.projection = nn.Linear(
+            self.n_scalars * seq_length, head_dim, bias=value_bias
+        )
 
     @property
     def n_factors(self) -> int:
@@ -1238,6 +1249,8 @@ class LinearDifferencesBias(LightningModule):
         k_wide = torch.cat(
             [k, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
         )
+        if not self.value_bias:
+            return q_wide, k_wide, v, lambda out: out
         v_wide = torch.cat(
             [v, c.expand(-1, heads, -1), s.expand(-1, heads, -1)], -1
         )
