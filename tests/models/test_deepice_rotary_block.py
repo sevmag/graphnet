@@ -85,3 +85,78 @@ def test_only_mean_pooling_is_available() -> None:
     """A cls token has no coordinates to rotate by."""
     with pytest.raises(ValueError, match="mean pooling"):
         _model(pooling="cls")
+
+
+def _block_output(
+    shift: float, rotate_queries_keys: bool, rotate_values: bool
+) -> torch.Tensor:
+    """One block over fixed tokens, with every rotation angle shifted."""
+    torch.manual_seed(0)
+    block = RotaryTransformerBlock(
+        d_model=32,
+        nhead=2,
+        dim_feedforward=64,
+        dropout=0.0,
+        layerscale_init=1.0,
+        rotate_queries_keys=rotate_queries_keys,
+        rotate_values=rotate_values,
+    ).double()
+    block.eval()
+    g = torch.Generator().manual_seed(2)
+    x = torch.randn(2, 7, 32, generator=g, dtype=torch.double)
+    angles = torch.randn(2, 1, 7, 8, generator=g, dtype=torch.double) * 3
+    plane_shift = shift * torch.arange(1.0, 9.0, dtype=torch.double)
+    angles = angles + plane_shift
+    with torch.no_grad():
+        return block(x, (angles.cos(), angles.sin()))
+
+
+@pytest.mark.parametrize(
+    "rotate_queries_keys, rotate_values",
+    [(True, False), (True, True), (False, True)],
+)
+def test_block_depends_only_on_relative_angles(
+    rotate_queries_keys: bool, rotate_values: bool
+) -> None:
+    """A common shift of every angle leaves the output unchanged."""
+    torch.testing.assert_close(
+        _block_output(0.0, rotate_queries_keys, rotate_values),
+        _block_output(1.7, rotate_queries_keys, rotate_values),
+    )
+
+
+def test_rotated_values_carry_position_into_the_output() -> None:
+    """With value rotation the output depends on the rotation angles."""
+    plain = _block_output(0.0, False, True)
+    torch.manual_seed(0)
+    block = (
+        RotaryTransformerBlock(
+            d_model=32,
+            nhead=2,
+            dim_feedforward=64,
+            dropout=0.0,
+            layerscale_init=1.0,
+            rotate_queries_keys=False,
+            rotate_values=True,
+        )
+        .double()
+        .eval()
+    )
+    g = torch.Generator().manual_seed(2)
+    x = torch.randn(2, 7, 32, generator=g, dtype=torch.double)
+    flat = torch.zeros(2, 1, 7, 8, dtype=torch.double)
+    with torch.no_grad():
+        unrotated = block(x, (flat.cos(), flat.sin()))
+    assert not torch.allclose(plain, unrotated)
+
+
+def test_a_block_without_any_rotation_is_rejected() -> None:
+    """Attention with no rotation carries no position."""
+    with pytest.raises(ValueError, match="carries no position"):
+        RotaryTransformerBlock(
+            d_model=32,
+            nhead=2,
+            dim_feedforward=64,
+            rotate_queries_keys=False,
+            rotate_values=False,
+        )

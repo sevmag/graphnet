@@ -979,6 +979,8 @@ class RotaryTransformerBlock(LightningModule):
         qk_norm: bool = True,
         drop_path_rate: float = 0.0,
         layerscale_init: float = 1e-5,
+        rotate_queries_keys: bool = True,
+        rotate_values: bool = False,
     ):
         """Construct `RotaryTransformerBlock`.
 
@@ -993,8 +995,21 @@ class RotaryTransformerBlock(LightningModule):
             qk_norm: Whether to RMS-normalize queries and keys per head.
             drop_path_rate: Stochastic-depth rate of this block.
             layerscale_init: Initial value of the LayerScale parameters.
+            rotate_queries_keys: Rotate queries and keys, so the attention
+                weights depend on relative position.
+            rotate_values: Rotate the values by their own position and the
+                attention output back by the query's, so the output sums
+                `R(theta_j - theta_i) v_j` and carries relative position
+                too, the rotary counterpart of a pair bias on the values.
         """
         super().__init__()
+        if not (rotate_queries_keys or rotate_values):
+            raise ValueError(
+                "RotaryTransformerBlock needs rotate_queries_keys or "
+                "rotate_values; without either it carries no position"
+            )
+        self.rotate_queries_keys = rotate_queries_keys
+        self.rotate_values = rotate_values
         if d_model % nhead != 0:
             raise ValueError("d_model must be divisible by nhead")
         self.nhead = nhead
@@ -1044,8 +1059,11 @@ class RotaryTransformerBlock(LightningModule):
         q, k, v = qkv.permute(2, 0, 3, 1, 4)  # each [B, H, S, head_dim]
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
-        q = RoPE4D.rotate(q, *rope_tables)
-        k = RoPE4D.rotate(k, *rope_tables)
+        if self.rotate_queries_keys:
+            q = RoPE4D.rotate(q, *rope_tables)
+            k = RoPE4D.rotate(k, *rope_tables)
+        if self.rotate_values:
+            v = RoPE4D.rotate(v, *rope_tables)
 
         if block_mask is not None:
             attn = flex_attention(q, k, v, block_mask=block_mask)
@@ -1053,6 +1071,9 @@ class RotaryTransformerBlock(LightningModule):
             attn = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=attn_mask
             )
+        if self.rotate_values:
+            cos, sin = rope_tables
+            attn = RoPE4D.rotate(attn, cos, -sin)
         attn = attn.transpose(1, 2).reshape(batch_size, seq_length, -1)
         attn = self.dropout(self.gamma_1 * self.out_proj(attn))
         x = x + self.drop_path1(attn, event_id, num_events)
