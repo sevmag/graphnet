@@ -33,6 +33,8 @@ class DeepIceRotaryBlock(DeepIceRope):
         layerscale_init: float = 1e-5,
         dropout: float = 0.0,
         drop_path_rate: float = 0.0,
+        rotate_queries_keys: bool = True,
+        rotate_values: bool = False,
         **kwargs: Any,
     ):
         """Construct `DeepIceRotaryBlock`.
@@ -52,6 +54,10 @@ class DeepIceRotaryBlock(DeepIceRope):
             dropout: Dropout on the attention and feed-forward branches.
             drop_path_rate: Stochastic-depth rate of the last block, ramped
                 linearly from zero.
+            rotate_queries_keys: Rotate queries and keys; see
+                `RotaryTransformerBlock`.
+            rotate_values: Rotate values and outputs; see
+                `RotaryTransformerBlock`.
             **kwargs: Further arguments of `DeepIceRope`.
         """
         if pooling != "mean":
@@ -78,6 +84,8 @@ class DeepIceRotaryBlock(DeepIceRope):
                 qk_norm=qk_norm,
                 drop_path_rate=rate,
                 layerscale_init=layerscale_init,
+                rotate_queries_keys=rotate_queries_keys,
+                rotate_values=rotate_values,
             )
             for rate in torch.linspace(0, drop_path_rate, depth).tolist()
         )
